@@ -1,0 +1,11 @@
+[package]
+name = "validator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+reference-orderbook = { path = "../reference-orderbook" }
+serde_json = "1"
+

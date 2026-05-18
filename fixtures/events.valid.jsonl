@@ -1,0 +1,4 @@
+{"event_type":"order_sent","run_id":"run_fixture_001","bot_id":"bot_1","seq_no":1,"send_ts_ns":1770000000000000002,"order":{"type":"new_order","run_id":"run_fixture_001","client_order_id":"buy_late","side":"BUY","price":10025,"qty":5,"ts_ns":1770000000000000002}}
+{"event_type":"order_sent","run_id":"run_fixture_001","bot_id":"bot_2","seq_no":1,"send_ts_ns":1770000000000000001,"order":{"type":"new_order","run_id":"run_fixture_001","client_order_id":"buy_early","side":"BUY","price":10025,"qty":5,"ts_ns":1770000000000000001}}
+{"event_type":"order_sent","run_id":"run_fixture_001","bot_id":"bot_3","seq_no":1,"send_ts_ns":1770000000000000003,"order":{"type":"new_order","run_id":"run_fixture_001","client_order_id":"sell_1","side":"SELL","price":10025,"qty":5,"ts_ns":1770000000000000003}}
+

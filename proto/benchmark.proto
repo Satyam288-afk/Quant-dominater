@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package benchmark.v1;
+
+option go_package = "github.com/iicpc/benchmark-platform/proto/benchmark/v1;benchmarkv1";
+
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  SIDE_BUY = 1;
+  SIDE_SELL = 2;
+}
+
+enum OrderType {
+  ORDER_TYPE_UNSPECIFIED = 0;
+  ORDER_TYPE_LIMIT = 1;
+  ORDER_TYPE_MARKET = 2;
+}
+
+enum AckStatus {
+  ACK_STATUS_UNSPECIFIED = 0;
+  ACK_STATUS_ACCEPTED = 1;
+  ACK_STATUS_REJECTED = 2;
+  ACK_STATUS_CANCELED = 3;
+  ACK_STATUS_NOT_FOUND = 4;
+}
+
+message NewOrder {
+  string run_id = 1;
+  string client_order_id = 2;
+  Side side = 3;
+  int64 price = 4;
+  int64 qty = 5;
+  uint64 ts_ns = 6;
+  OrderType order_type = 7;
+  string symbol = 8;
+}
+
+message CancelOrder {
+  string run_id = 1;
+  string client_order_id = 2;
+  string orig_client_order_id = 3;
+  uint64 ts_ns = 4;
+}
+
+message Ack {
+  string client_order_id = 1;
+  AckStatus status = 2;
+  uint64 engine_seq = 3;
+  uint64 ts_ns = 4;
+  string reason = 5;
+}
+
+message Fill {
+  string buy_order_id = 1;
+  string sell_order_id = 2;
+  int64 price = 3;
+  int64 qty = 4;
+  uint64 engine_seq = 5;
+}
+
+message BenchmarkEnvelope {
+  string type = 1;
+  oneof payload {
+    NewOrder new_order = 2;
+    CancelOrder cancel_order = 3;
+    Ack ack = 4;
+    Fill fill = 5;
+  }
+}
+
+message TelemetryEvent {
+  string run_id = 1;
+  string bot_id = 2;
+  uint64 seq_no = 3;
+  string client_order_id = 4;
+  string event_type = 5;
+  uint64 send_ts_ns = 6;
+  uint64 recv_ts_ns = 7;
+  uint64 latency_ns = 8;
+}

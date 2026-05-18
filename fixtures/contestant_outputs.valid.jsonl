@@ -1,0 +1,2 @@
+{"event_type":"fill_received","run_id":"run_fixture_001","engine_seq":2,"message":{"type":"fill","buy_order_id":"buy_early","sell_order_id":"sell_1","price":10025,"qty":5,"engine_seq":2}}
+
