@@ -17,7 +17,22 @@ func main() {
 		log.Fatal(err)
 	}
 
-	runner := sandbox.NewLocalRunner(repoRoot, filepath.Join(repoRoot, ".runs", "sandbox-runner"))
+	runRoot := filepath.Join(repoRoot, ".runs", "sandbox-runner")
+	mode := os.Getenv("SANDBOX_RUNNER_MODE")
+	if mode == "" {
+		mode = "local"
+	}
+
+	var runner sandbox.Runner
+	switch mode {
+	case "local":
+		runner = sandbox.NewLocalRunner(repoRoot, runRoot)
+	case "docker":
+		runner = sandbox.NewDockerRunner(repoRoot, runRoot)
+	default:
+		log.Fatalf("unsupported SANDBOX_RUNNER_MODE %q", mode)
+	}
+
 	handler := api.NewHandler(runner)
 
 	mux := http.NewServeMux()
@@ -28,7 +43,7 @@ func main() {
 		addr = ":9200"
 	}
 
-	log.Printf("sandbox runner listening on %s repo_root=%s", addr, repoRoot)
+	log.Printf("sandbox runner listening on %s repo_root=%s mode=%s", addr, repoRoot, mode)
 	log.Fatal(http.ListenAndServe(addr, mux))
 }
 

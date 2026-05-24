@@ -2,10 +2,15 @@
 
 Go service boundary for building and running contestant engines.
 
-This is intentionally local-first. The current implementation exposes the right
-API shape, but its local runner starts the existing Go stub engine from
-`examples/stub-engine`. Later implementations can replace this with Docker,
-rootless BuildKit, and gVisor without changing the orchestrator contract.
+This is intentionally local-first but now has two runner modes:
+
+```text
+local  - starts the built-in Go stub engine directly
+docker - builds a submitted artifact into a Docker image and runs it
+```
+
+The Docker runner is the first real sandbox step. BuildKit and gVisor are still
+future hardening layers.
 
 ## Run
 
@@ -19,6 +24,12 @@ The API listens on `:9200` by default. Override with:
 SANDBOX_RUNNER_ADDR=:9201 make sandbox-runner
 ```
 
+Use Docker mode with:
+
+```bash
+SANDBOX_RUNNER_MODE=docker make sandbox-runner
+```
+
 ## Endpoints
 
 ```text
@@ -30,7 +41,7 @@ GET  /sandboxes/{sandbox_id}
 POST /sandboxes/{sandbox_id}/stop
 ```
 
-## Local Contract
+## Local Runner Contract
 
 ```bash
 curl -X POST http://localhost:9200/sandboxes/build \
@@ -45,3 +56,40 @@ curl -X POST http://localhost:9200/sandboxes/start \
 ```
 
 This starts a local stub engine and returns a WebSocket endpoint.
+
+In Docker mode, use the `image_ref` returned from `/sandboxes/build`; it will
+use the `docker://...` scheme.
+
+## Docker Artifact Format
+
+For Docker mode, submit either:
+
+```text
+a zip file containing go.mod + main.go
+a directory containing go.mod + main.go
+a zip/directory containing a custom Dockerfile
+```
+
+If no Dockerfile is present and `language=go`, the runner generates a simple
+multi-stage Dockerfile that builds the module and runs the resulting binary on
+port `8080`.
+
+The engine should implement:
+
+```text
+GET /health
+WS  /ws
+```
+
+For the current Docker demo path, the runner starts the engine with:
+
+```text
+--addr :8080
+--events /artifacts/engine_outputs.jsonl
+```
+
+If `engine_mode` is provided, it also passes:
+
+```text
+--mode <engine_mode>
+```
