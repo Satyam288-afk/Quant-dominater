@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package benchmark.v1;
 
-option go_package = "github.com/iicpc/benchmark-platform/proto/benchmark/v1;benchmarkv1";
+option go_package = "github.com/Satyam288-afk/Quant-dominater/proto/benchmark/v1;benchmarkv1";
 
 enum Side {
   SIDE_UNSPECIFIED = 0;
@@ -22,6 +22,20 @@ enum AckStatus {
   ACK_STATUS_REJECTED = 2;
   ACK_STATUS_CANCELED = 3;
   ACK_STATUS_NOT_FOUND = 4;
+}
+
+enum RunStatus {
+  RUN_STATUS_UNSPECIFIED = 0;
+  QUEUED = 1;
+  BUILDING = 2;
+  SANDBOX_STARTING = 3;
+  HEALTHCHECKING = 4;
+  BENCHMARKING = 5;
+  VALIDATING = 6;
+  SCORING = 7;
+  FINISHED = 8;
+  FAILED = 9;
+  CANCELLED = 10;
 }
 
 message NewOrder {
@@ -77,4 +91,57 @@ message TelemetryEvent {
   uint64 send_ts_ns = 6;
   uint64 recv_ts_ns = 7;
   uint64 latency_ns = 8;
+}
+
+message Submission {
+  string submission_id = 1;
+  string team_id = 2;
+  string language = 3;
+  string protocol = 4;
+  SubmissionArtifact artifact = 5;
+  int64 created_at_unix = 6;
+}
+
+message SubmissionArtifact {
+  string artifact_id = 1;
+  string uri = 2;
+  string sha256 = 3;
+  int64 size_bytes = 4;
+}
+
+message SandboxSpec {
+  string cpu_limit = 1;
+  string memory_limit = 2;
+  bool network_egress = 3;
+}
+
+message BenchmarkRunConfig {
+  int32 bot_count = 1;
+  int32 rate_per_bot = 2;
+  int32 duration_sec = 3;
+  int32 warmup_sec = 4;
+  string engine_endpoint = 5;
+}
+
+message BenchmarkRun {
+  string run_id = 1;
+  string submission_id = 2;
+  string team_id = 3;
+  RunStatus status = 4;
+  int64 benchmark_seed = 5;
+  SandboxSpec sandbox = 6;
+  BenchmarkRunConfig config = 7;
+  int64 created_at_unix = 8;
+  int64 updated_at_unix = 9;
+}
+
+message ScoreResult {
+  string run_id = 1;
+  bool valid = 2;
+  double final_score = 3;
+  double p50_ms = 4;
+  double p90_ms = 5;
+  double p99_ms = 6;
+  double tps = 7;
+  string failure_reason = 8;
 }
