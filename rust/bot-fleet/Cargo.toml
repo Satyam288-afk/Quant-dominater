@@ -2,6 +2,15 @@
 name = "bot-fleet"
 version = "0.1.0"
 edition = "2021"
+default-run = "bot-fleet"
+
+[[bin]]
+name = "bot-fleet"
+path = "src/main.rs"
+
+[[bin]]
+name = "price-time-probe"
+path = "src/bin/price_time_probe.rs"
 
 [dependencies]
 anyhow = "1"
@@ -11,4 +20,3 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.21"
-

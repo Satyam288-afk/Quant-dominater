@@ -24,8 +24,10 @@ Kubernetes, Terraform, Redpanda, Redis, MinIO, and sandboxing are intentionally 
 | `rust/bot-fleet` | Rust Tokio bot fleet and local metrics collector |
 | `rust/reference-orderbook` | Deterministic price-time reference matcher |
 | `rust/validator` | Replays inputs and compares contestant fills |
+| `services/control-panel` | Go API for creating and tracking local benchmark runs |
 | `fixtures` | Tiny validation fixtures |
 | `scripts/run-local-demo.sh` | One-command local slice demo |
+| `scripts/run-price-time-proof.sh` | Correct engine vs intentionally broken engine proof |
 
 ## Prerequisites
 
@@ -50,7 +52,7 @@ Terminal 2:
 
 ```bash
 cd /Users/satyamkumar/iicpc
-cargo run -p bot-fleet -- \
+cargo run -p bot-fleet --bin bot-fleet -- \
   --target ws://localhost:8080/ws \
   --bots 100 \
   --orders-per-sec 5 \
@@ -72,6 +74,78 @@ Or run the short scripted demo:
 
 ```bash
 ./scripts/run-local-demo.sh
+```
+
+## Run The Control Panel
+
+The control panel wraps the same local slice with an HTTP API:
+
+```bash
+make control-panel
+```
+
+Create a run:
+
+```bash
+curl -X POST http://localhost:9000/api/runs \
+  -H "Content-Type: application/json" \
+  -d '{"team_id":"team_1","engine_mode":"normal","bot_count":10,"orders_per_sec":5,"duration_sec":5,"seed":42}'
+```
+
+List runs:
+
+```bash
+curl http://localhost:9000/api/runs
+```
+
+## Prove The Validator Is Real
+
+Run the price-time-priority proof:
+
+```bash
+./scripts/run-price-time-proof.sh
+```
+
+This starts the stub engine twice:
+
+```text
+mode=normal
+mode=broken-price-time-priority
+```
+
+The probe sends this exact sequence on one symbol:
+
+```text
+1. buy_late  price=10025 ts=...002
+2. buy_early price=10025 ts=...001
+3. sell_1    price=10025 ts=...003
+```
+
+The reference orderbook expects `buy_early` to fill first because same-price orders use earliest timestamp priority. Normal mode passes. Broken mode intentionally sorts same-price resting orders by later timestamp first, so it fails:
+
+```json
+{
+  "valid": false,
+  "reason": "PRICE_TIME_PRIORITY_VIOLATION",
+  "expected": {
+    "buy_order_id": "buy_early",
+    "sell_order_id": "sell_1",
+    "price": 10025,
+    "qty": 5
+  },
+  "actual": {
+    "buy_order_id": "buy_late",
+    "sell_order_id": "sell_1",
+    "price": 10025,
+    "qty": 5
+  }
+}
+```
+
+Artifacts are written to:
+
+```text
+.runs/price-time-proof/
 ```
 
 ## Expected Bot Fleet Output

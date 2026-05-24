@@ -61,7 +61,10 @@ fn replay_expected_fills(path: &PathBuf) -> Result<(String, Vec<Fill>)> {
             let order: NewOrder = serde_json::from_value(order_value.clone())
                 .with_context(|| format!("decode new_order at line {}", line_no + 1))?;
             run_id = order.run_id.clone();
-            let symbol = order.symbol.clone().unwrap_or_else(|| "DEFAULT".to_string());
+            let symbol = order
+                .symbol
+                .clone()
+                .unwrap_or_else(|| "DEFAULT".to_string());
             let book = books.entry(symbol).or_default();
             let fills = book
                 .process_new_order(order)
@@ -78,7 +81,10 @@ fn replay_expected_fills(path: &PathBuf) -> Result<(String, Vec<Fill>)> {
                     }
                 }
             } else {
-                return Err(anyhow!("cancel_order missing orig_client_order_id at line {}", line_no + 1));
+                return Err(anyhow!(
+                    "cancel_order missing orig_client_order_id at line {}",
+                    line_no + 1
+                ));
             }
         }
     }

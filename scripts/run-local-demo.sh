@@ -34,7 +34,7 @@ curl -fsS http://localhost:8080/health
 echo "running bot fleet"
 (
   cd "$ROOT_DIR"
-  cargo run -p bot-fleet -- \
+  cargo run -p bot-fleet --bin bot-fleet -- \
     --target ws://localhost:8080/ws \
     --bots 10 \
     --orders-per-sec 2 \
@@ -53,4 +53,3 @@ echo "validating outputs"
 )
 
 echo "local demo artifacts written to $RUN_DIR"
-

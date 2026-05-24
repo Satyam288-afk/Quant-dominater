@@ -136,11 +136,19 @@ impl OrderBook {
     }
 
     pub fn cancel(&mut self, order_id: &str) -> bool {
-        if let Some(idx) = self.buys.iter().position(|order| order.order_id == order_id) {
+        if let Some(idx) = self
+            .buys
+            .iter()
+            .position(|order| order.order_id == order_id)
+        {
             self.buys.remove(idx);
             return true;
         }
-        if let Some(idx) = self.sells.iter().position(|order| order.order_id == order_id) {
+        if let Some(idx) = self
+            .sells
+            .iter()
+            .position(|order| order.order_id == order_id)
+        {
             self.sells.remove(idx);
             return true;
         }

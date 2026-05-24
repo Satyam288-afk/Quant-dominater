@@ -81,6 +81,7 @@ type Engine struct {
 	engineSeq uint64
 	insertSeq uint64
 	books     map[string]*Book
+	mode      string
 }
 
 func (e *Engine) nextSeq() uint64 {
@@ -140,13 +141,13 @@ func (e *Engine) ProcessNew(in NewOrder, owner *Client) (Ack, []FillDelivery) {
 		deliveries = e.matchBuy(book, active, orderType == "MARKET")
 		if active.Qty > 0 && orderType != "MARKET" {
 			book.buys = append(book.buys, active)
-			sortBook(book)
+			e.sortBook(book)
 		}
 	} else {
 		deliveries = e.matchSell(book, active, orderType == "MARKET")
 		if active.Qty > 0 && orderType != "MARKET" {
 			book.sells = append(book.sells, active)
-			sortBook(book)
+			e.sortBook(book)
 		}
 	}
 
@@ -258,13 +259,16 @@ func (e *Engine) matchSell(book *Book, active *Order, market bool) []FillDeliver
 	return deliveries
 }
 
-func sortBook(book *Book) {
+func (e *Engine) sortBook(book *Book) {
 	sort.SliceStable(book.buys, func(i, j int) bool {
 		a, b := book.buys[i], book.buys[j]
 		if a.Price != b.Price {
 			return a.Price > b.Price
 		}
 		if a.TsNs != b.TsNs {
+			if e.mode == "broken-price-time-priority" {
+				return a.TsNs > b.TsNs
+			}
 			return a.TsNs < b.TsNs
 		}
 		return a.InsertSeq < b.InsertSeq
@@ -275,6 +279,9 @@ func sortBook(book *Book) {
 			return a.Price < b.Price
 		}
 		if a.TsNs != b.TsNs {
+			if e.mode == "broken-price-time-priority" {
+				return a.TsNs > b.TsNs
+			}
 			return a.TsNs < b.TsNs
 		}
 		return a.InsertSeq < b.InsertSeq
@@ -464,7 +471,12 @@ func nowNs() uint64 {
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	eventsPath := flag.String("events", "engine-events.jsonl", "engine-side JSONL audit log")
+	mode := flag.String("mode", "normal", "engine mode: normal or broken-price-time-priority")
 	flag.Parse()
+
+	if *mode != "normal" && *mode != "broken-price-time-priority" {
+		log.Fatalf("unsupported mode %q", *mode)
+	}
 
 	logger, err := NewJSONLLogger(*eventsPath)
 	if err != nil {
@@ -472,7 +484,7 @@ func main() {
 	}
 
 	server := &Server{
-		engine: &Engine{},
+		engine: &Engine{mode: *mode},
 		logger: logger,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(_ *http.Request) bool { return true },
@@ -484,6 +496,6 @@ func main() {
 	mux.HandleFunc("/orders", server.orders)
 	mux.HandleFunc("/ws", server.ws)
 
-	log.Printf("stub engine listening on %s", *addr)
+	log.Printf("stub engine listening on %s mode=%s", *addr, *mode)
 	log.Fatal(http.ListenAndServe(*addr, mux))
 }

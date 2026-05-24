@@ -245,7 +245,8 @@ fn handle_engine_message(
     stats: &mut BotStats,
     output_tx: &mpsc::UnboundedSender<Value>,
 ) -> Result<()> {
-    let message: Value = serde_json::from_str(text).with_context(|| format!("decode engine message: {text}"))?;
+    let message: Value =
+        serde_json::from_str(text).with_context(|| format!("decode engine message: {text}"))?;
     let message_type = message.get("type").and_then(Value::as_str).unwrap_or("");
     let recv_ts_ns = now_ns();
 
