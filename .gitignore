@@ -16,6 +16,7 @@ vendor/
 
 # Environment / Runs
 .runs/
+.artifacts/
 .env
 
 # MacOS

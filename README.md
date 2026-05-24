@@ -21,6 +21,7 @@ Kubernetes, Terraform, Redpanda, Redis, MinIO, and sandboxing are intentionally 
 | `docs/API_CONTRACT.md` | WebSocket/REST message contract |
 | `proto/benchmark.proto` | Protobuf version of the benchmark messages |
 | `examples/stub-engine` | Go WebSocket/REST contestant engine stub |
+| `services/submission-api` | Go API for storing submissions and queued run records |
 | `rust/bot-fleet` | Rust Tokio bot fleet and local metrics collector |
 | `rust/reference-orderbook` | Deterministic price-time reference matcher |
 | `rust/validator` | Replays inputs and compares contestant fills |

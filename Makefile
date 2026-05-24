@@ -1,4 +1,4 @@
-.PHONY: test-rust bot-fleet validator stub-engine validate-fixture control-panel
+.PHONY: test-rust bot-fleet validator stub-engine validate-fixture control-panel submission-api
 
 test-rust:
 	cargo test --workspace
@@ -17,3 +17,6 @@ stub-engine:
 
 control-panel:
 	cd services/control-panel && REPO_ROOT=$(CURDIR) go run .
+
+submission-api:
+	cd services/submission-api && REPO_ROOT=$(CURDIR) go run .
