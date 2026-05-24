@@ -71,25 +71,45 @@ type BenchmarkRun struct {
 	FinishedAt     *time.Time         `json:"finished_at,omitempty"`
 }
 
-type CreateRunRequest struct {
-	BenchmarkSeed int64              `json:"benchmark_seed"`
-	Sandbox       SandboxSpec        `json:"sandbox"`
-	Config        BenchmarkRunConfig `json:"config"`
+type Metrics struct {
+	RunID         string  `json:"run_id"`
+	Bots          int     `json:"bots"`
+	OrdersSent    int     `json:"orders_sent"`
+	AcksReceived  int     `json:"acks_received"`
+	FillsReceived int     `json:"fills_received"`
+	Timeouts      int     `json:"timeouts"`
+	ConnectErrors int     `json:"connect_errors"`
+	TPS           float64 `json:"tps"`
+	P50MS         float64 `json:"p50_ms,omitempty"`
+	P90MS         float64 `json:"p90_ms,omitempty"`
+	P99MS         float64 `json:"p99_ms,omitempty"`
+	EventsOut     string  `json:"events_out,omitempty"`
+	OutputsOut    string  `json:"outputs_out,omitempty"`
+	RawOutput     string  `json:"raw_output,omitempty"`
 }
 
-func DefaultRunRequest() CreateRunRequest {
-	return CreateRunRequest{
-		BenchmarkSeed: 42,
-		Sandbox: SandboxSpec{
-			CPULimit:      "1",
-			MemoryLimit:   "512Mi",
-			NetworkEgress: false,
-		},
-		Config: BenchmarkRunConfig{
-			BotCount:    10,
-			RatePerBot:  2,
-			DurationSec: 5,
-			WarmupSec:   0,
-		},
-	}
+type ValidationResult struct {
+	RunID        string         `json:"run_id"`
+	Valid        bool           `json:"valid"`
+	FillsChecked int            `json:"fills_checked,omitempty"`
+	Reason       string         `json:"reason,omitempty"`
+	FirstBadSeq  int            `json:"first_bad_seq,omitempty"`
+	Expected     map[string]any `json:"expected,omitempty"`
+	Actual       map[string]any `json:"actual,omitempty"`
+	Raw          map[string]any `json:"raw,omitempty"`
+}
+
+type ScoreResult struct {
+	RunID           string  `json:"run_id"`
+	Score           float64 `json:"score"`
+	Valid           bool    `json:"valid"`
+	LatencyScore    float64 `json:"latency_score"`
+	ThroughputScore float64 `json:"throughput_score"`
+	StabilityScore  float64 `json:"stability_score"`
+	ResourceScore   float64 `json:"resource_score"`
+	CorrectnessGate string  `json:"correctness_gate"`
+}
+
+func Terminal(status RunStatus) bool {
+	return status == RunStatusFinished || status == RunStatusFailed || status == RunStatusCancelled
 }

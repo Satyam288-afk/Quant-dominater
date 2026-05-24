@@ -10,27 +10,45 @@ import (
 	"path/filepath"
 	"time"
 
-	"control-panel/internal/run"
+	"orchestrator/internal/model"
 )
 
-type Engine struct {
-	RepoRoot string
+type LocalEngine struct {
+	repoRoot string
 }
 
-func (e *Engine) Start(ctx context.Context, r *run.BenchmarkRun) (string, func(context.Context) error, error) {
+type EngineHandle struct {
+	Endpoint string
+	cleanup  func(context.Context) error
+}
+
+func NewLocalEngine(repoRoot string) *LocalEngine {
+	return &LocalEngine{repoRoot: repoRoot}
+}
+
+func (e *LocalEngine) Build(ctx context.Context, run *model.BenchmarkRun, submission *model.Submission) error {
+	data := fmt.Sprintf(
+		"{\n  \"submission_id\": %q,\n  \"artifact_uri\": %q,\n  \"language\": %q,\n  \"builder\": \"local-stub\"\n}\n",
+		submission.SubmissionID,
+		submission.Artifact.URI,
+		submission.Language,
+	)
+	return os.WriteFile(filepath.Join(run.ArtifactDir, "build.json"), []byte(data), 0o644)
+}
+
+func (e *LocalEngine) Start(ctx context.Context, run *model.BenchmarkRun) (EngineHandle, error) {
 	port, err := freePort()
 	if err != nil {
-		return "", nil, err
+		return EngineHandle{}, err
 	}
 
-	eventsPath := filepath.Join(r.ArtifactDir, "engine_outputs.jsonl")
-	logFile, err := os.OpenFile(filepath.Join(r.ArtifactDir, "run.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := os.OpenFile(filepath.Join(run.ArtifactDir, "run.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		return "", nil, err
+		return EngineHandle{}, err
 	}
 
-	engineDir := filepath.Join(e.RepoRoot, "examples", "stub-engine")
-	binaryPath := filepath.Join(r.ArtifactDir, "stub-engine")
+	engineDir := filepath.Join(e.repoRoot, "examples", "stub-engine")
+	binaryPath := filepath.Join(run.ArtifactDir, "stub-engine")
 	_, _ = fmt.Fprintf(logFile, "\n$ (cd %s && go build -o %s .)\n", engineDir, binaryPath)
 	buildCmd := exec.CommandContext(ctx, "go", "build", "-o", binaryPath, ".")
 	buildCmd.Dir = engineDir
@@ -38,13 +56,13 @@ func (e *Engine) Start(ctx context.Context, r *run.BenchmarkRun) (string, func(c
 	buildCmd.Stderr = logFile
 	if err := buildCmd.Run(); err != nil {
 		_ = logFile.Close()
-		return "", nil, fmt.Errorf("build stub engine: %w", err)
+		return EngineHandle{}, fmt.Errorf("build stub engine: %w", err)
 	}
 
 	args := []string{
 		"--addr", fmt.Sprintf(":%d", port),
-		"--mode", r.EngineMode,
-		"--events", eventsPath,
+		"--mode", "normal",
+		"--events", filepath.Join(run.ArtifactDir, "engine_outputs.jsonl"),
 	}
 	_, _ = fmt.Fprintf(logFile, "\n$ %s %v\n", binaryPath, args)
 
@@ -52,10 +70,9 @@ func (e *Engine) Start(ctx context.Context, r *run.BenchmarkRun) (string, func(c
 	cmd.Dir = engineDir
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
-		return "", nil, fmt.Errorf("start stub engine: %w", err)
+		return EngineHandle{}, err
 	}
 
 	done := make(chan error, 1)
@@ -67,14 +84,22 @@ func (e *Engine) Start(ctx context.Context, r *run.BenchmarkRun) (string, func(c
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", port)
 	if err := waitForHealth(ctx, healthURL); err != nil {
 		_ = stopProcess(context.Background(), cmd, done)
-		return "", nil, err
+		return EngineHandle{}, err
 	}
 
-	cleanup := func(ctx context.Context) error {
-		return stopProcess(ctx, cmd, done)
-	}
+	return EngineHandle{
+		Endpoint: fmt.Sprintf("ws://127.0.0.1:%d/ws", port),
+		cleanup: func(ctx context.Context) error {
+			return stopProcess(ctx, cmd, done)
+		},
+	}, nil
+}
 
-	return fmt.Sprintf("ws://127.0.0.1:%d/ws", port), cleanup, nil
+func (h EngineHandle) Stop(ctx context.Context) error {
+	if h.cleanup == nil {
+		return nil
+	}
+	return h.cleanup(ctx)
 }
 
 func freePort() (int, error) {
@@ -93,13 +118,12 @@ func waitForHealth(ctx context.Context, url string) error {
 
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return fmt.Errorf("engine healthcheck timed out: %s", url)
+			return fmt.Errorf("healthcheck timed out: %s", url)
 		case <-ticker.C:
 			resp, err := client.Get(url)
 			if err == nil {
@@ -113,34 +137,30 @@ func waitForHealth(ctx context.Context, url string) error {
 }
 
 func stopProcess(ctx context.Context, cmd *exec.Cmd, done <-chan error) error {
-	if cmd.Process == nil {
+	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
-
 	select {
 	case err := <-done:
-		return ignoreExpectedExit(err)
+		return ignoreExitError(err)
 	default:
 	}
-
 	_ = cmd.Process.Signal(os.Interrupt)
-
 	select {
 	case err := <-done:
-		return ignoreExpectedExit(err)
+		return ignoreExitError(err)
 	case <-time.After(1500 * time.Millisecond):
 		_ = cmd.Process.Kill()
 	}
-
 	select {
 	case err := <-done:
-		return ignoreExpectedExit(err)
+		return ignoreExitError(err)
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
-func ignoreExpectedExit(err error) error {
+func ignoreExitError(err error) error {
 	if err == nil {
 		return nil
 	}
