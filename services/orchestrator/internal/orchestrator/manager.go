@@ -257,6 +257,7 @@ func createArtifactPlaceholders(dir string) error {
 	names := []string{
 		"run_spec.json",
 		"build.json",
+		"sandbox.json",
 		"engine_outputs.jsonl",
 		"events.jsonl",
 		"contestant_outputs.jsonl",

@@ -41,7 +41,7 @@ curl -X POST http://localhost:9200/sandboxes/build \
 ```bash
 curl -X POST http://localhost:9200/sandboxes/start \
   -H "Content-Type: application/json" \
-  -d '{"run_id":"run_1","image_ref":"local://sub_1","engine_mode":"normal"}'
+  -d '{"run_id":"run_1","image_ref":"local://sub_1","engine_mode":"normal","events_path":".runs/run_1/engine_outputs.jsonl"}'
 ```
 
 This starts a local stub engine and returns a WebSocket endpoint.

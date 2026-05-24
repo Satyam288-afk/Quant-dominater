@@ -20,9 +20,13 @@ func main() {
 	}
 
 	st := store.NewJSONStore(filepath.Join(repoRoot, ".artifacts", "submissions", "index.json"))
+	sandboxRunnerURL := os.Getenv("SANDBOX_RUNNER_URL")
+	if sandboxRunnerURL == "" {
+		sandboxRunnerURL = "http://127.0.0.1:9200"
+	}
 	runner := orchestrator.NewManager(
 		st,
-		executor.NewLocalEngine(repoRoot),
+		executor.NewSandboxEngine(sandboxRunnerURL),
 		executor.NewBotFleet(repoRoot),
 		executor.NewValidator(repoRoot),
 		filepath.Join(repoRoot, ".runs"),
@@ -37,7 +41,7 @@ func main() {
 		addr = ":9300"
 	}
 
-	log.Printf("orchestrator listening on %s repo_root=%s", addr, repoRoot)
+	log.Printf("orchestrator listening on %s repo_root=%s sandbox_runner_url=%s", addr, repoRoot, sandboxRunnerURL)
 	log.Fatal(http.ListenAndServe(addr, mux))
 }
 

@@ -6,9 +6,10 @@ The orchestrator reads queued run records from the submission API local metadata
 store at `.artifacts/submissions/index.json`, advances each run through the
 benchmark lifecycle, and writes per-run artifacts under `.runs/{run_id}`.
 
-This is still local-first: it starts the existing Go stub engine and Rust
-bot-fleet/validator directly. The service boundary is shaped so the local engine
-starter can later be replaced by the sandbox-runner Docker/gVisor path.
+This is still local-first: it reads the submission API's local JSON metadata and
+runs the Rust bot-fleet/validator directly. Engine build/start/stop already goes
+through the sandbox-runner HTTP boundary so that Docker/gVisor can replace the
+sandbox internals later.
 
 ## Run
 
@@ -16,10 +17,16 @@ starter can later be replaced by the sandbox-runner Docker/gVisor path.
 make orchestrator
 ```
 
+Start `sandbox-runner` first in another terminal:
+
+```bash
+make sandbox-runner
+```
+
 The API listens on `:9300` by default. Override with:
 
 ```bash
-ORCHESTRATOR_ADDR=:9301 make orchestrator
+ORCHESTRATOR_ADDR=:9301 SANDBOX_RUNNER_URL=http://127.0.0.1:9200 make orchestrator
 ```
 
 ## Endpoints

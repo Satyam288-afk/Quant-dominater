@@ -94,10 +94,19 @@ func (r *LocalRunner) Start(req StartRequest) (SandboxHandle, error) {
 		return SandboxHandle{}, err
 	}
 
+	eventsPath := req.EventsPath
+	if eventsPath == "" {
+		eventsPath = filepath.Join(dir, "engine-events.jsonl")
+	}
+	if err := os.MkdirAll(filepath.Dir(eventsPath), 0o755); err != nil {
+		_ = logFile.Close()
+		return SandboxHandle{}, err
+	}
+
 	args := []string{
 		"--addr", fmt.Sprintf(":%d", port),
 		"--mode", req.EngineMode,
-		"--events", filepath.Join(dir, "engine-events.jsonl"),
+		"--events", eventsPath,
 	}
 	_, _ = fmt.Fprintf(logFile, "$ %s %v\n", binaryPath, args)
 
