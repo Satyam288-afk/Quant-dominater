@@ -1,8 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
+  "rust/bench-core",
   "rust/bot-fleet",
   "rust/reference-orderbook",
+  "rust/score-engine",
+  "rust/telemetry-ingester",
   "rust/validator",
 ]
 

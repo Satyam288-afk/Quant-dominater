@@ -6,7 +6,7 @@ ENGINE_DIR="$ROOT_DIR/examples/stub-engine"
 RUN_DIR="$ROOT_DIR/.runs/local-demo"
 
 mkdir -p "$RUN_DIR"
-rm -f "$RUN_DIR/events.jsonl" "$RUN_DIR/contestant_outputs.jsonl" "$RUN_DIR/engine-events.jsonl"
+rm -f "$RUN_DIR/events.jsonl" "$RUN_DIR/contestant_outputs.jsonl" "$RUN_DIR/engine-events.jsonl" "$RUN_DIR/telemetry.jsonl"
 
 cleanup() {
   if [[ -n "${ENGINE_PID:-}" ]]; then
@@ -41,7 +41,8 @@ echo "running bot fleet"
     --duration-sec 5 \
     --seed 42 \
     --events-out "$RUN_DIR/events.jsonl" \
-    --outputs-out "$RUN_DIR/contestant_outputs.jsonl"
+    --outputs-out "$RUN_DIR/contestant_outputs.jsonl" \
+    --telemetry-out "$RUN_DIR/telemetry.jsonl"
 )
 
 echo "validating outputs"

@@ -14,9 +14,14 @@ path = "src/bin/price_time_probe.rs"
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+bench-core = { path = "../bench-core" }
+clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.21"
+
+[features]
+default = []
+kafka = ["bench-core/kafka"]

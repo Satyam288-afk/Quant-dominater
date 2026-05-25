@@ -1,0 +1,73 @@
+name: quant-dominater
+
+services:
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    container_name: qd-redpanda
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr internal://redpanda:8082,external://localhost:18082
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr redpanda:33145
+      - --advertise-rpc-addr redpanda:33145
+      - --mode dev-container
+      - --smp 1
+      - --default-log-level=warn
+    ports:
+      - "19092:19092"
+      - "18081:18081"
+      - "18082:18082"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health --exit-when-healthy"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  timescaledb:
+    image: timescale/timescaledb:2.16.1-pg16
+    container_name: qd-timescale
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    ports:
+      - "55432:5432"
+    volumes:
+      - ./init-timescale.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bench -d bench"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: qd-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redpanda-init:
+    image: redpandadata/redpanda:v24.2.7
+    container_name: qd-redpanda-init
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        rpk topic create telemetry.events.v1 --brokers redpanda:9092 -p 4 -r 1 || true
+        rpk topic create bench.orders.v1     --brokers redpanda:9092 -p 4 -r 1 || true
+        rpk topic create bench.fills.v1      --brokers redpanda:9092 -p 4 -r 1 || true
+        rpk topic create bench.scores.v1     --brokers redpanda:9092 -p 2 -r 1 || true
+        rpk topic list --brokers redpanda:9092

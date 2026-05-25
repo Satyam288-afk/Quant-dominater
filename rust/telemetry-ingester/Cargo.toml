@@ -1,0 +1,32 @@
+[package]
+name = "telemetry-ingester"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "telemetry-ingester"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+bench-core = { path = "../bench-core", features = ["hdr"] }
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Live backend (Kafka + Timescale + Redis). Enable via cargo --features live.
+# rdkafka requires librdkafka native lib; sqlx/redis require running services.
+# Kept optional so the file pipeline builds without any of them.
+rdkafka = { version = "0.36", optional = true, default-features = false, features = ["tokio", "cmake-build"] }
+sqlx = { version = "0.8", optional = true, default-features = false, features = ["runtime-tokio", "postgres", "macros", "chrono"] }
+redis = { version = "0.27", optional = true, default-features = false, features = ["tokio-comp", "aio", "connection-manager"] }
+
+[features]
+default = []
+kafka = ["dep:rdkafka"]
+timescale = ["dep:sqlx"]
+redis-backend = ["dep:redis"]
+live = ["kafka", "timescale", "redis-backend"]

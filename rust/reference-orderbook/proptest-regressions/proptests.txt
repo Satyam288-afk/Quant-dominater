@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc cccee1645351bf2a97075257a7dd9a3edfb0769d84041ca2aa173aa74eadfb82 # shrinks to actions = [Place { id: 15, side: Buy, price: 96, qty: 1, ts_ns: 0 }, Place { id: 0, side: Sell, price: 97, qty: 1, ts_ns: 0 }, Place { id: 15, side: Sell, price: 97, qty: 1, ts_ns: 0 }, Cancel { id: 15 }, Place { id: 0, side: Sell, price: 90, qty: 1, ts_ns: 0 }]

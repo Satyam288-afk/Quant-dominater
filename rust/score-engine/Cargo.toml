@@ -1,0 +1,25 @@
+[package]
+name = "score-engine"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "score-engine"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+bench-core = { path = "../bench-core" }
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["fs", "rt-multi-thread", "macros"] }
+
+# Live backend deps. Reads metrics from TimescaleDB, pushes the final
+# score into the `scores` table + the global leaderboard ZSET in Redis.
+sqlx = { version = "0.8", optional = true, default-features = false, features = ["runtime-tokio", "postgres", "macros", "chrono", "bigdecimal"] }
+redis = { version = "0.27", optional = true, default-features = false, features = ["tokio-comp", "aio", "connection-manager"] }
+
+[features]
+default = []
+live = ["dep:sqlx", "dep:redis"]
