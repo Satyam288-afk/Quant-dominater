@@ -17,7 +17,7 @@ go run .
 Or from anywhere:
 
 ```bash
-REPO_ROOT=/Users/satyamkumar/iicpc go run /Users/satyamkumar/iicpc/services/control-panel
+REPO_ROOT=../.. go run .
 ```
 
 The API listens on `:9000` by default. Override it with:
@@ -29,6 +29,7 @@ CONTROL_PANEL_ADDR=:9001 go run .
 ## Endpoints
 
 ```text
+GET    /health
 POST   /api/runs
 GET    /api/runs
 GET    /api/runs/{run_id}

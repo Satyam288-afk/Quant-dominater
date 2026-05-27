@@ -12,8 +12,8 @@ POST /orders
 
 `GET /health` returns:
 
-```text
-OK
+```json
+{"status":"ok"}
 ```
 
 ## Message Rules
@@ -23,6 +23,8 @@ OK
 - `run_id` identifies the benchmark run.
 - `client_order_id` is globally unique within a run.
 - `symbol` is optional; if omitted, engines should use `DEFAULT`.
+- Fill messages should include `symbol` so validation can enforce price-time
+  priority per book while allowing independent symbols to interleave.
 - Prices and quantities are integers.
 - `ts_ns` is nanoseconds and is used for deterministic replay.
 - Engines must emit monotonically increasing `engine_seq` values for outputs.
@@ -88,6 +90,7 @@ not_found
 ```json
 {
   "type": "fill",
+  "symbol": "SYM_1",
   "buy_order_id": "bot_1_0001",
   "sell_order_id": "bot_2_0007",
   "price": 10025,
@@ -111,7 +114,7 @@ The bot fleet writes contestant outputs to `contestant_outputs.jsonl`:
 ```
 
 ```json
-{"event_type":"fill_received","run_id":"run_local_001","engine_seq":2,"message":{"type":"fill","buy_order_id":"bot_1_000001","sell_order_id":"bot_2_000007","price":10025,"qty":5,"engine_seq":2}}
+{"event_type":"fill_received","run_id":"run_local_001","engine_seq":2,"message":{"type":"fill","symbol":"SYM_1","buy_order_id":"bot_1_000001","sell_order_id":"bot_2_000007","price":10025,"qty":5,"engine_seq":2}}
 ```
 
 ## Correctness Semantics
@@ -119,6 +122,7 @@ The bot fleet writes contestant outputs to `contestant_outputs.jsonl`:
 - BUY book priority: highest price first, then earliest `ts_ns`, then insertion order.
 - SELL book priority: lowest price first, then earliest `ts_ns`, then insertion order.
 - Trade price is the resting order price.
+- Fill order is validated per symbol. Independent symbols may interleave.
 - Limit orders with remaining quantity rest on the book.
 - Market orders never rest.
 - Cancel succeeds only for a resting order with remaining quantity.

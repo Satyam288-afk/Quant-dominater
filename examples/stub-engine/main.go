@@ -48,6 +48,7 @@ type Ack struct {
 }
 
 type Fill struct {
+	Symbol      string `json:"symbol,omitempty"`
 	Type        string `json:"type"`
 	BuyOrderID  string `json:"buy_order_id"`
 	SellOrderID string `json:"sell_order_id"`
@@ -58,6 +59,7 @@ type Fill struct {
 
 type Order struct {
 	ID        string
+	Symbol    string
 	Side      string
 	Price     int64
 	Qty       int64
@@ -125,9 +127,14 @@ func (e *Engine) ProcessNew(in NewOrder, owner *Client) (Ack, []FillDelivery) {
 	}
 
 	e.insertSeq++
-	book := e.bookFor(in.Symbol)
+	symbol := in.Symbol
+	if symbol == "" {
+		symbol = "DEFAULT"
+	}
+	book := e.bookFor(symbol)
 	active := &Order{
 		ID:        in.ClientOrderID,
+		Symbol:    symbol,
 		Side:      side,
 		Price:     in.Price,
 		Qty:       in.Qty,
@@ -210,6 +217,7 @@ func (e *Engine) matchBuy(book *Book, active *Order, market bool) []FillDelivery
 		}
 		qty := minInt64(active.Qty, resting.Qty)
 		fill := Fill{
+			Symbol:      resting.Symbol,
 			Type:        "fill",
 			BuyOrderID:  active.ID,
 			SellOrderID: resting.ID,
@@ -239,6 +247,7 @@ func (e *Engine) matchSell(book *Book, active *Order, market bool) []FillDeliver
 		}
 		qty := minInt64(active.Qty, resting.Qty)
 		fill := Fill{
+			Symbol:      resting.Symbol,
 			Type:        "fill",
 			BuyOrderID:  resting.ID,
 			SellOrderID: active.ID,
@@ -330,8 +339,8 @@ type Server struct {
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain")
-	_, _ = w.Write([]byte("OK\n"))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func (s *Server) orders(w http.ResponseWriter, r *http.Request) {

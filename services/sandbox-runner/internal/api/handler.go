@@ -16,8 +16,7 @@ func NewHandler(runner sandbox.Runner) *Handler {
 }
 
 func (h *Handler) Health(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte("OK\n"))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *Handler) Build(w http.ResponseWriter, r *http.Request) {

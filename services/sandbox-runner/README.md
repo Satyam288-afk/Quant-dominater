@@ -9,10 +9,14 @@ local  - starts the built-in Go stub engine directly
 docker - builds a submitted artifact into a Docker image and runs it
 ```
 
-The Docker runner is the first real sandbox step. BuildKit and gVisor are still
-future hardening layers.
+The Docker runner uses the Docker SDK to build images and create containers with
+CPU, memory, PID, capability, and no-new-privileges settings. BuildKit and gVisor
+are still future hardening layers.
 
 ## Run
+
+Docker mode should be built with Go 1.25+ because of the Docker SDK dependency
+set.
 
 ```bash
 make sandbox-runner
@@ -81,6 +85,12 @@ GET /health
 WS  /ws
 ```
 
+`GET /health` should return JSON:
+
+```json
+{"status":"ok"}
+```
+
 For the current Docker demo path, the runner starts the engine with:
 
 ```text
@@ -93,3 +103,6 @@ If `engine_mode` is provided, it also passes:
 ```text
 --mode <engine_mode>
 ```
+
+Docker mode publishes the engine on a random localhost port and mounts the run
+artifact directory at `/artifacts`.

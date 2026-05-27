@@ -9,4 +9,5 @@ func RegisterRoutes(mux *http.ServeMux, h *Handler) {
 	mux.HandleFunc("POST /runs/{run_id}/start", h.StartRun)
 	mux.HandleFunc("POST /runs/{run_id}/cancel", h.CancelRun)
 	mux.HandleFunc("POST /runs/next", h.StartNextQueued)
+	mux.HandleFunc("POST /api/benchmark", h.BenchmarkEndpoint)
 }

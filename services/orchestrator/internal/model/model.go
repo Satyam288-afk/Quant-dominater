@@ -34,6 +34,7 @@ const (
 	RunStatusFinished        RunStatus = "FINISHED"
 	RunStatusFailed          RunStatus = "FAILED"
 	RunStatusCancelled       RunStatus = "CANCELLED"
+	RunStatusTimedOut        RunStatus = "TIMED_OUT"
 )
 
 type SandboxSpec struct {
@@ -110,6 +111,23 @@ type ScoreResult struct {
 	CorrectnessGate string  `json:"correctness_gate"`
 }
 
+type DirectBenchmarkRequest struct {
+	EndpointURL   string             `json:"endpoint_url"`
+	BenchmarkSeed int64              `json:"benchmark_seed"`
+	Config        BenchmarkRunConfig `json:"config"`
+	TimeoutSec    int                `json:"timeout_sec,omitempty"`
+}
+
+type DirectBenchmarkResult struct {
+	Run        *BenchmarkRun     `json:"run"`
+	Metrics    *Metrics          `json:"metrics,omitempty"`
+	Validation *ValidationResult `json:"validation,omitempty"`
+	Score      *ScoreResult      `json:"score,omitempty"`
+}
+
 func Terminal(status RunStatus) bool {
-	return status == RunStatusFinished || status == RunStatusFailed || status == RunStatusCancelled
+	return status == RunStatusFinished ||
+		status == RunStatusFailed ||
+		status == RunStatusCancelled ||
+		status == RunStatusTimedOut
 }

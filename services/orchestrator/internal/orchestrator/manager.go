@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,7 +22,8 @@ type Store interface {
 	GetRun(ctx context.Context, runID string) (*model.BenchmarkRun, error)
 	ListRuns(ctx context.Context) ([]*model.BenchmarkRun, error)
 	SaveRun(ctx context.Context, run *model.BenchmarkRun) error
-	NextQueuedRun(ctx context.Context) (*model.BenchmarkRun, error)
+	ClaimRun(ctx context.Context, runID string) (*model.BenchmarkRun, error)
+	ClaimNextQueuedRun(ctx context.Context) (*model.BenchmarkRun, error)
 }
 
 type Engine interface {
@@ -38,40 +40,42 @@ type Validator interface {
 }
 
 type Manager struct {
-	store     Store
-	engine    Engine
-	botfleet  BotFleet
-	validator Validator
-	runRoot   string
+	store      Store
+	engine     Engine
+	botfleet   BotFleet
+	validator  Validator
+	runRoot    string
+	runTimeout time.Duration
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
 }
 
-func NewManager(store Store, engine Engine, botfleet BotFleet, validator Validator, runRoot string) *Manager {
+func NewManager(store Store, engine Engine, botfleet BotFleet, validator Validator, runRoot string, runTimeout time.Duration) *Manager {
+	if runTimeout <= 0 {
+		runTimeout = 3 * time.Minute
+	}
 	return &Manager{
-		store:     store,
-		engine:    engine,
-		botfleet:  botfleet,
-		validator: validator,
-		runRoot:   runRoot,
-		cancels:   make(map[string]context.CancelFunc),
+		store:      store,
+		engine:     engine,
+		botfleet:   botfleet,
+		validator:  validator,
+		runRoot:    runRoot,
+		runTimeout: runTimeout,
+		cancels:    make(map[string]context.CancelFunc),
 	}
 }
 
 func (m *Manager) StartRun(ctx context.Context, runID string) (*model.BenchmarkRun, error) {
-	run, err := m.store.GetRun(ctx, runID)
+	run, err := m.store.ClaimRun(ctx, runID)
 	if err != nil {
-		return nil, err
+		return run, err
 	}
 	if model.Terminal(run.Status) {
 		return run, nil
 	}
-	if run.Status != model.RunStatusQueued {
-		return run, fmt.Errorf("run is already in progress: %s", run.Status)
-	}
 
-	runCtx, cancel := context.WithCancel(context.Background())
+	runCtx, cancel := context.WithTimeout(context.Background(), m.runTimeout)
 	m.mu.Lock()
 	m.cancels[run.RunID] = cancel
 	m.mu.Unlock()
@@ -81,11 +85,17 @@ func (m *Manager) StartRun(ctx context.Context, runID string) (*model.BenchmarkR
 }
 
 func (m *Manager) StartNextQueued(ctx context.Context) (*model.BenchmarkRun, error) {
-	run, err := m.store.NextQueuedRun(ctx)
+	run, err := m.store.ClaimNextQueuedRun(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return m.StartRun(ctx, run.RunID)
+	runCtx, cancel := context.WithTimeout(context.Background(), m.runTimeout)
+	m.mu.Lock()
+	m.cancels[run.RunID] = cancel
+	m.mu.Unlock()
+
+	go m.execute(runCtx, run)
+	return run, nil
 }
 
 func (m *Manager) CancelRun(ctx context.Context, runID string) (*model.BenchmarkRun, error) {
@@ -112,18 +122,96 @@ func (m *Manager) CancelRun(ctx context.Context, runID string) (*model.Benchmark
 	return run, nil
 }
 
+func (m *Manager) BenchmarkEndpoint(ctx context.Context, req model.DirectBenchmarkRequest) (*model.DirectBenchmarkResult, error) {
+	endpoint := strings.TrimSpace(req.EndpointURL)
+	if endpoint == "" {
+		return nil, errors.New("endpoint_url is required")
+	}
+	if req.BenchmarkSeed == 0 {
+		req.BenchmarkSeed = 42
+	}
+	normalizeConfig(&req.Config)
+
+	timeout := m.runTimeout
+	if req.TimeoutSec > 0 {
+		timeout = time.Duration(req.TimeoutSec) * time.Second
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	now := time.Now()
+	run := &model.BenchmarkRun{
+		RunID:         fmt.Sprintf("direct_%d", now.UnixNano()),
+		TeamID:        "direct",
+		Status:        model.RunStatusBenchmarking,
+		BenchmarkSeed: req.BenchmarkSeed,
+		Config:        req.Config,
+		CreatedAtUnix: now.Unix(),
+		UpdatedAtUnix: now.Unix(),
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	run.Config.EngineEndpoint = endpoint
+	run.ArtifactDir = filepath.Join(m.runRoot, run.RunID)
+	if err := os.MkdirAll(run.ArtifactDir, 0o755); err != nil {
+		return nil, err
+	}
+	if err := createArtifactPlaceholders(run.ArtifactDir); err != nil {
+		return nil, err
+	}
+	if err := m.writeRunSpec(run); err != nil {
+		return nil, err
+	}
+	_ = appendRunLog(run, "direct benchmark started")
+
+	metrics, err := m.botfleet.Run(runCtx, run, endpoint)
+	if err != nil {
+		return m.finishDirectFailure(runCtx, run, "BENCHMARKING", err, metrics, nil, nil), nil
+	}
+
+	store.Touch(run, model.RunStatusValidating)
+	_ = m.writeRunSpec(run)
+	validation, err := m.validator.Run(runCtx, run)
+	if err != nil {
+		return m.finishDirectFailure(runCtx, run, "VALIDATING", err, metrics, validation, nil), nil
+	}
+	run.Valid = &validation.Valid
+
+	store.Touch(run, model.RunStatusScoring)
+	_ = m.writeRunSpec(run)
+	score, err := executor.Score(run, metrics, validation)
+	if err != nil {
+		return m.finishDirectFailure(runCtx, run, "SCORING", err, metrics, validation, nil), nil
+	}
+	run.Score = score.Score
+
+	now = time.Now()
+	run.Status = model.RunStatusFinished
+	run.UpdatedAt = now
+	run.UpdatedAtUnix = now.Unix()
+	run.FinishedAt = &now
+	run.FinishedAtUnix = now.Unix()
+	_ = m.writeRunSpec(run)
+	_ = appendRunLog(run, "direct benchmark finished")
+
+	return &model.DirectBenchmarkResult{
+		Run:        run,
+		Metrics:    metrics,
+		Validation: validation,
+		Score:      &score,
+	}, nil
+}
+
 func (m *Manager) execute(ctx context.Context, run *model.BenchmarkRun) {
 	defer func() {
 		m.mu.Lock()
+		cancel := m.cancels[run.RunID]
 		delete(m.cancels, run.RunID)
 		m.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 	}()
-
-	submission, err := m.store.GetSubmission(ctx, run.SubmissionID)
-	if err != nil {
-		m.fail(ctx, run, "LOAD_SUBMISSION", err)
-		return
-	}
 
 	run.ArtifactDir = filepath.Join(m.runRoot, run.RunID)
 	if err := os.MkdirAll(run.ArtifactDir, 0o755); err != nil {
@@ -135,6 +223,12 @@ func (m *Manager) execute(ctx context.Context, run *model.BenchmarkRun) {
 		return
 	}
 	_ = appendRunLog(run, "orchestrator run started")
+
+	submission, err := m.store.GetSubmission(ctx, run.SubmissionID)
+	if err != nil {
+		m.fail(ctx, run, "LOAD_SUBMISSION", err)
+		return
+	}
 
 	if err := m.transition(ctx, run, model.RunStatusBuilding); err != nil {
 		m.fail(ctx, run, "BUILDING", err)
@@ -212,6 +306,33 @@ func (m *Manager) execute(ctx context.Context, run *model.BenchmarkRun) {
 	slog.Info("orchestrator run finished", "run_id", run.RunID, "valid", validation.Valid, "score", run.Score)
 }
 
+func (m *Manager) finishDirectFailure(ctx context.Context, run *model.BenchmarkRun, stage string, err error, metrics *model.Metrics, validation *model.ValidationResult, score *model.ScoreResult) *model.DirectBenchmarkResult {
+	now := time.Now()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		run.Status = model.RunStatusTimedOut
+		run.FailureReason = "run timed out"
+	} else if errors.Is(ctx.Err(), context.Canceled) {
+		run.Status = model.RunStatusCancelled
+		run.FailureReason = "cancelled"
+	} else {
+		run.Status = model.RunStatusFailed
+		run.FailureReason = err.Error()
+	}
+	run.FailureStage = stage
+	run.UpdatedAt = now
+	run.UpdatedAtUnix = now.Unix()
+	run.FinishedAt = &now
+	run.FinishedAtUnix = now.Unix()
+	_ = m.writeRunSpec(run)
+	_ = appendRunLog(run, fmt.Sprintf("direct benchmark stopped at %s: %s", stage, run.FailureReason))
+	return &model.DirectBenchmarkResult{
+		Run:        run,
+		Metrics:    metrics,
+		Validation: validation,
+		Score:      score,
+	}
+}
+
 func (m *Manager) transition(ctx context.Context, run *model.BenchmarkRun, status model.RunStatus) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -224,11 +345,29 @@ func (m *Manager) transition(ctx context.Context, run *model.BenchmarkRun, statu
 	return m.store.SaveRun(ctx, run)
 }
 
+func normalizeConfig(config *model.BenchmarkRunConfig) {
+	if config.BotCount <= 0 {
+		config.BotCount = 10
+	}
+	if config.RatePerBot <= 0 {
+		config.RatePerBot = 2
+	}
+	if config.DurationSec <= 0 {
+		config.DurationSec = 5
+	}
+	if config.WarmupSec < 0 {
+		config.WarmupSec = 0
+	}
+}
+
 func (m *Manager) fail(ctx context.Context, run *model.BenchmarkRun, stage string, err error) {
 	now := time.Now()
 	if errors.Is(ctx.Err(), context.Canceled) {
 		run.Status = model.RunStatusCancelled
 		run.FailureReason = "cancelled"
+	} else if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		run.Status = model.RunStatusTimedOut
+		run.FailureReason = "run timed out"
 	} else {
 		run.Status = model.RunStatusFailed
 		run.FailureReason = err.Error()

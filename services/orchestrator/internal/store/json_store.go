@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -97,7 +98,34 @@ func (s *JSONStore) SaveRun(_ context.Context, run *model.BenchmarkRun) error {
 	return ErrNotFound
 }
 
-func (s *JSONStore) NextQueuedRun(_ context.Context) (*model.BenchmarkRun, error) {
+func (s *JSONStore) ClaimRun(_ context.Context, runID string) (*model.BenchmarkRun, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	snap, err := s.loadLocked()
+	if err != nil {
+		return nil, err
+	}
+	for _, run := range snap.Runs {
+		if run.RunID != runID {
+			continue
+		}
+		if model.Terminal(run.Status) {
+			return cloneRun(run), nil
+		}
+		if run.Status != model.RunStatusQueued {
+			return cloneRun(run), fmt.Errorf("run is already in progress: %s", run.Status)
+		}
+		Touch(run, model.RunStatusBuilding)
+		if err := s.writeLocked(snap); err != nil {
+			return nil, err
+		}
+		return cloneRun(run), nil
+	}
+	return nil, ErrNotFound
+}
+
+func (s *JSONStore) ClaimNextQueuedRun(_ context.Context) (*model.BenchmarkRun, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -110,6 +138,10 @@ func (s *JSONStore) NextQueuedRun(_ context.Context) (*model.BenchmarkRun, error
 	})
 	for _, run := range snap.Runs {
 		if run.Status == model.RunStatusQueued {
+			Touch(run, model.RunStatusBuilding)
+			if err := s.writeLocked(snap); err != nil {
+				return nil, err
+			}
 			return cloneRun(run), nil
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"orchestrator/internal/api"
 	"orchestrator/internal/executor"
@@ -24,12 +25,21 @@ func main() {
 	if sandboxRunnerURL == "" {
 		sandboxRunnerURL = "http://127.0.0.1:9200"
 	}
+	runTimeout := 3 * time.Minute
+	if value := os.Getenv("ORCHESTRATOR_RUN_TIMEOUT"); value != "" {
+		parsed, err := time.ParseDuration(value)
+		if err != nil {
+			log.Fatalf("invalid ORCHESTRATOR_RUN_TIMEOUT %q: %v", value, err)
+		}
+		runTimeout = parsed
+	}
 	runner := orchestrator.NewManager(
 		st,
 		executor.NewSandboxEngine(sandboxRunnerURL),
 		executor.NewBotFleet(repoRoot),
 		executor.NewValidator(repoRoot),
 		filepath.Join(repoRoot, ".runs"),
+		runTimeout,
 	)
 
 	handler := api.NewHandler(runner, st)
@@ -41,7 +51,7 @@ func main() {
 		addr = ":9300"
 	}
 
-	log.Printf("orchestrator listening on %s repo_root=%s sandbox_runner_url=%s", addr, repoRoot, sandboxRunnerURL)
+	log.Printf("orchestrator listening on %s repo_root=%s sandbox_runner_url=%s run_timeout=%s", addr, repoRoot, sandboxRunnerURL, runTimeout)
 	log.Fatal(http.ListenAndServe(addr, mux))
 }
 

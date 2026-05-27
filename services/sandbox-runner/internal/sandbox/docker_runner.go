@@ -1,17 +1,27 @@
 package sandbox
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/network"
+	dockerclient "github.com/docker/docker/client"
+	"github.com/docker/docker/errdefs"
+	"github.com/docker/go-connections/nat"
 )
 
 const dockerContainerPort = "8080"
@@ -49,9 +59,6 @@ func (r *DockerRunner) Build(req BuildRequest) (ImageRef, error) {
 	if req.Language == "" {
 		req.Language = "go"
 	}
-	if _, err := exec.LookPath("docker"); err != nil {
-		return ImageRef{}, fmt.Errorf("docker is required for SANDBOX_RUNNER_MODE=docker: %w", err)
-	}
 
 	artifactPath, err := resolveLocalArtifact(r.repoRoot, req.ArtifactURI)
 	if err != nil {
@@ -72,12 +79,31 @@ func (r *DockerRunner) Build(req BuildRequest) (ImageRef, error) {
 	}
 	defer logFile.Close()
 
-	cmd := exec.Command("docker", "build", "-t", imageTag, ".")
-	cmd.Dir = buildDir
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	if err := cmd.Run(); err != nil {
-		return ImageRef{}, fmt.Errorf("docker build failed: %w (see %s)", err, logPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	cli, err := newDockerClient()
+	if err != nil {
+		return ImageRef{}, err
+	}
+	defer cli.Close()
+
+	buildContext, err := tarBuildContext(buildDir)
+	if err != nil {
+		return ImageRef{}, err
+	}
+	resp, err := cli.ImageBuild(ctx, buildContext, types.ImageBuildOptions{
+		Tags:        []string{imageTag},
+		Remove:      true,
+		ForceRemove: true,
+	})
+	if err != nil {
+		return ImageRef{}, fmt.Errorf("docker image build failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := writeDockerBuildLog(logFile, resp.Body); err != nil {
+		return ImageRef{}, fmt.Errorf("docker image build failed: %w (see %s)", err, logPath)
 	}
 
 	image := ImageRef{
@@ -124,35 +150,75 @@ func (r *DockerRunner) Start(req StartRequest) (SandboxHandle, error) {
 
 	containerEventsPath := "/artifacts/" + filepath.Base(eventsPath)
 	args := []string{
-		"run",
-		"-d",
-		"--rm",
-		"--name", sandboxID,
-		"-p", "127.0.0.1::" + dockerContainerPort,
-		"-v", filepath.Dir(eventsPath) + ":/artifacts",
+		"--addr", ":" + dockerContainerPort,
+		"--events", containerEventsPath,
 	}
-	if req.Spec.CPULimit != "" {
-		args = append(args, "--cpus", normalizeDockerCPUs(req.Spec.CPULimit))
-	}
-	if req.Spec.MemoryLimit != "" {
-		args = append(args, "--memory", normalizeDockerMemory(req.Spec.MemoryLimit))
-	}
-	args = append(args, imageTag)
-	args = append(args, "--addr", ":"+dockerContainerPort, "--events", containerEventsPath)
 	if req.EngineMode != "" {
 		args = append(args, "--mode", req.EngineMode)
 	}
 
-	output, err := exec.Command("docker", args...).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cli, err := newDockerClient()
 	if err != nil {
-		return SandboxHandle{}, fmt.Errorf("docker run failed: %w: %s", err, string(output))
+		return SandboxHandle{}, err
 	}
-	containerID := strings.TrimSpace(string(output))
-	if containerID == "" {
-		return SandboxHandle{}, errors.New("docker run returned empty container id")
+	defer cli.Close()
+
+	port, err := nat.NewPort("tcp", dockerContainerPort)
+	if err != nil {
+		return SandboxHandle{}, err
 	}
 
-	hostPort, err := dockerHostPort(containerID)
+	pidsLimit := int64(512)
+	createResp, err := cli.ContainerCreate(
+		ctx,
+		&container.Config{
+			Image: imageTag,
+			Cmd:   args,
+			ExposedPorts: nat.PortSet{
+				port: struct{}{},
+			},
+		},
+		&container.HostConfig{
+			AutoRemove: true,
+			Binds: []string{
+				filepath.Dir(eventsPath) + ":/artifacts",
+			},
+			CapDrop:        []string{"ALL"},
+			NetworkMode:    "bridge",
+			ReadonlyRootfs: true,
+			Resources: container.Resources{
+				Memory:    parseDockerMemoryBytes(req.Spec.MemoryLimit),
+				NanoCPUs:  parseDockerNanoCPUs(req.Spec.CPULimit),
+				PidsLimit: &pidsLimit,
+			},
+			PortBindings: nat.PortMap{
+				port: []nat.PortBinding{{
+					HostIP:   "127.0.0.1",
+					HostPort: "",
+				}},
+			},
+			SecurityOpt: []string{"no-new-privileges:true"},
+		},
+		&network.NetworkingConfig{},
+		nil,
+		sandboxID,
+	)
+	if err != nil {
+		return SandboxHandle{}, fmt.Errorf("docker container create failed: %w", err)
+	}
+	containerID := createResp.ID
+	if containerID == "" {
+		return SandboxHandle{}, errors.New("docker container create returned empty id")
+	}
+	if err := cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
+		_ = dockerStop(containerID)
+		return SandboxHandle{}, fmt.Errorf("docker container start failed: %w", err)
+	}
+
+	hostPort, err := dockerHostPort(containerID, port)
 	if err != nil {
 		_ = dockerStop(containerID)
 		return SandboxHandle{}, err
@@ -215,28 +281,139 @@ func (r *DockerRunner) List() []SandboxHandle {
 	return out
 }
 
-func dockerHostPort(containerID string) (string, error) {
-	output, err := exec.Command("docker", "port", containerID, dockerContainerPort+"/tcp").CombinedOutput()
+func newDockerClient() (*dockerclient.Client, error) {
+	cli, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
 	if err != nil {
-		return "", fmt.Errorf("docker port failed: %w: %s", err, string(output))
+		return nil, fmt.Errorf("docker client: %w", err)
 	}
-	text := strings.TrimSpace(string(output))
-	if text == "" {
-		return "", fmt.Errorf("docker returned no port mapping for container %s", containerID)
-	}
-	_, port, err := net.SplitHostPort(text)
+	return cli, nil
+}
+
+func dockerHostPort(containerID string, port nat.Port) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cli, err := newDockerClient()
 	if err != nil {
 		return "", err
 	}
-	return port, nil
+	defer cli.Close()
+
+	var lastErr error
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		inspect, err := cli.ContainerInspect(ctx, containerID)
+		if err != nil {
+			lastErr = err
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		bindings := inspect.NetworkSettings.Ports[port]
+		if len(bindings) > 0 && bindings[0].HostPort != "" {
+			return bindings[0].HostPort, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if lastErr != nil {
+		return "", fmt.Errorf("docker inspect failed: %w", lastErr)
+	}
+	return "", fmt.Errorf("docker returned no port mapping for container %s", containerID)
 }
 
 func dockerStop(containerID string) error {
-	output, err := exec.Command("docker", "rm", "-f", containerID).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cli, err := newDockerClient()
 	if err != nil {
-		return fmt.Errorf("docker rm failed: %w: %s", err, string(output))
+		return err
+	}
+	defer cli.Close()
+
+	if err := cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil && !errdefs.IsNotFound(err) {
+		return fmt.Errorf("docker container remove failed: %w", err)
 	}
 	return nil
+}
+
+type dockerBuildMessage struct {
+	Stream      string `json:"stream"`
+	Error       string `json:"error"`
+	ErrorDetail *struct {
+		Message string `json:"message"`
+	} `json:"errorDetail"`
+}
+
+func writeDockerBuildLog(logFile io.Writer, body io.Reader) error {
+	decoder := json.NewDecoder(body)
+	for {
+		var message dockerBuildMessage
+		if err := decoder.Decode(&message); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		if message.Stream != "" {
+			_, _ = io.WriteString(logFile, message.Stream)
+		}
+		if message.Error != "" {
+			_, _ = io.WriteString(logFile, message.Error+"\n")
+			return errors.New(message.Error)
+		}
+		if message.ErrorDetail != nil && message.ErrorDetail.Message != "" {
+			_, _ = io.WriteString(logFile, message.ErrorDetail.Message+"\n")
+			return errors.New(message.ErrorDetail.Message)
+		}
+	}
+	return nil
+}
+
+func tarBuildContext(dir string) (io.Reader, error) {
+	var buf bytes.Buffer
+	writer := tar.NewWriter(&buf)
+	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.ToSlash(rel)
+		if err := writer.WriteHeader(header); err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		_, err = io.Copy(writer, file)
+		return err
+	})
+	if closeErr := writer.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return nil, err
+	}
+	return bytes.NewReader(buf.Bytes()), nil
 }
 
 var dockerTagPattern = regexp.MustCompile(`[^a-z0-9_.-]+`)
@@ -282,4 +459,44 @@ func normalizeDockerMemory(value string) string {
 		"ti", "t",
 	)
 	return replacer.Replace(value)
+}
+
+func parseDockerNanoCPUs(value string) int64 {
+	value = normalizeDockerCPUs(value)
+	if value == "" {
+		return 0
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || parsed <= 0 {
+		return 0
+	}
+	return int64(parsed * 1_000_000_000)
+}
+
+func parseDockerMemoryBytes(value string) int64 {
+	value = normalizeDockerMemory(value)
+	if value == "" {
+		return 0
+	}
+	multiplier := int64(1)
+	suffix := strings.ToLower(value[len(value)-1:])
+	switch suffix {
+	case "k":
+		multiplier = 1024
+		value = value[:len(value)-1]
+	case "m":
+		multiplier = 1024 * 1024
+		value = value[:len(value)-1]
+	case "g":
+		multiplier = 1024 * 1024 * 1024
+		value = value[:len(value)-1]
+	case "t":
+		multiplier = 1024 * 1024 * 1024 * 1024
+		value = value[:len(value)-1]
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || parsed <= 0 {
+		return 0
+	}
+	return int64(parsed * float64(multiplier))
 }

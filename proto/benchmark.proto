@@ -36,6 +36,7 @@ enum RunStatus {
   FINISHED = 8;
   FAILED = 9;
   CANCELLED = 10;
+  TIMED_OUT = 11;
 }
 
 message NewOrder {
@@ -65,11 +66,12 @@ message Ack {
 }
 
 message Fill {
-  string buy_order_id = 1;
-  string sell_order_id = 2;
-  int64 price = 3;
-  int64 qty = 4;
-  uint64 engine_seq = 5;
+  string symbol = 1;
+  string buy_order_id = 2;
+  string sell_order_id = 3;
+  int64 price = 4;
+  int64 qty = 5;
+  uint64 engine_seq = 6;
 }
 
 message BenchmarkEnvelope {

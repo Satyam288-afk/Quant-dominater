@@ -29,6 +29,12 @@ The API listens on `:9300` by default. Override with:
 ORCHESTRATOR_ADDR=:9301 SANDBOX_RUNNER_URL=http://127.0.0.1:9200 make orchestrator
 ```
 
+Runs are capped by `ORCHESTRATOR_RUN_TIMEOUT`, defaulting to `3m`:
+
+```bash
+ORCHESTRATOR_RUN_TIMEOUT=90s make orchestrator
+```
+
 ## Endpoints
 
 ```text
@@ -38,6 +44,7 @@ GET  /runs/{run_id}
 POST /runs/{run_id}/start
 POST /runs/{run_id}/cancel
 POST /runs/next
+POST /api/benchmark
 ```
 
 ## Local Flow
@@ -61,6 +68,7 @@ BENCHMARKING
 VALIDATING
 SCORING
 FINISHED
+TIMED_OUT
 ```
 
 Artifacts are written to:
@@ -68,3 +76,25 @@ Artifacts are written to:
 ```text
 .runs/{run_id}/
 ```
+
+## Direct Benchmark
+
+Judges or teammates can benchmark a running engine without creating a
+submission:
+
+```bash
+curl -X POST http://localhost:9300/api/benchmark \
+  -H "Content-Type: application/json" \
+  -d '{
+    "endpoint_url": "ws://localhost:8080/ws",
+    "benchmark_seed": 42,
+    "config": {
+      "bot_count": 10,
+      "rate_per_bot": 2,
+      "duration_sec": 5
+    }
+  }'
+```
+
+The orchestrator still writes a `.runs/direct_.../` artifact directory and
+returns metrics, validation, and score in the response.

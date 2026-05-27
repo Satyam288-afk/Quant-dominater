@@ -34,6 +34,7 @@ const (
 	RunStatusFinished        RunStatus = "FINISHED"
 	RunStatusFailed          RunStatus = "FAILED"
 	RunStatusCancelled       RunStatus = "CANCELLED"
+	RunStatusTimedOut        RunStatus = "TIMED_OUT"
 )
 
 type SandboxSpec struct {
