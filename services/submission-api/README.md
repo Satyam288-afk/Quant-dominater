@@ -20,7 +20,7 @@ Or directly:
 
 ```bash
 cd services/submission-api
-REPO_ROOT=/Users/satyamkumar/iicpc go run .
+REPO_ROOT=../.. go run .
 ```
 
 The API listens on `:9100` by default. Override with:

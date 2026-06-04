@@ -18,7 +18,15 @@ type LocalRunner struct {
 	runRoot  string
 
 	mu        sync.Mutex
+	images    map[string]*localImage
 	sandboxes map[string]*localSandbox
+}
+
+type localImage struct {
+	ref        ImageRef
+	buildDir   string
+	binaryPath string
+	language   string
 }
 
 type localSandbox struct {
@@ -32,6 +40,7 @@ func NewLocalRunner(repoRoot string, runRoot string) *LocalRunner {
 	return &LocalRunner{
 		repoRoot:  repoRoot,
 		runRoot:   runRoot,
+		images:    make(map[string]*localImage),
 		sandboxes: make(map[string]*localSandbox),
 	}
 }
@@ -44,15 +53,68 @@ func (r *LocalRunner) Build(req BuildRequest) (ImageRef, error) {
 		return ImageRef{}, errors.New("artifact_uri is required")
 	}
 	if req.Language == "" {
-		req.Language = "unknown"
+		req.Language = "go"
 	}
-	return ImageRef{
-		ImageRef:     "local://" + req.SubmissionID,
+	if req.Language != "go" {
+		return ImageRef{}, fmt.Errorf("local runner only supports go artifacts, got %q", req.Language)
+	}
+
+	artifactPath, err := resolveLocalArtifact(r.repoRoot, req.ArtifactURI)
+	if err != nil {
+		return ImageRef{}, err
+	}
+
+	buildID := fmt.Sprintf("%s_%d", sanitizeDockerTag(req.SubmissionID), time.Now().UnixNano())
+	buildDir := filepath.Join(r.runRoot, "builds", buildID)
+	if err := prepareBuildContext(artifactPath, buildDir, req.Language); err != nil {
+		return ImageRef{}, err
+	}
+
+	logFile, err := os.OpenFile(filepath.Join(buildDir, "local-build.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return ImageRef{}, err
+	}
+	defer logFile.Close()
+
+	if fileExists(filepath.Join(buildDir, "go.mod")) {
+		_, _ = fmt.Fprintf(logFile, "$ (cd %s && go mod tidy)\n", buildDir)
+		tidyCmd := exec.Command("go", "mod", "tidy")
+		tidyCmd.Dir = buildDir
+		tidyCmd.Stdout = logFile
+		tidyCmd.Stderr = logFile
+		if err := tidyCmd.Run(); err != nil {
+			return ImageRef{}, fmt.Errorf("go mod tidy: %w", err)
+		}
+	}
+
+	binaryPath := filepath.Join(buildDir, "engine")
+	_, _ = fmt.Fprintf(logFile, "$ (cd %s && go build -o %s .)\n", buildDir, binaryPath)
+	buildCmd := exec.Command("go", "build", "-o", binaryPath, ".")
+	buildCmd.Dir = buildDir
+	buildCmd.Stdout = logFile
+	buildCmd.Stderr = logFile
+	if err := buildCmd.Run(); err != nil {
+		return ImageRef{}, fmt.Errorf("go build: %w", err)
+	}
+
+	image := ImageRef{
+		ImageRef:     "local://" + buildID,
 		SubmissionID: req.SubmissionID,
 		ArtifactURI:  req.ArtifactURI,
 		Language:     req.Language,
 		BuiltAt:      time.Now(),
-	}, nil
+	}
+
+	r.mu.Lock()
+	r.images[image.ImageRef] = &localImage{
+		ref:        image,
+		buildDir:   buildDir,
+		binaryPath: binaryPath,
+		language:   req.Language,
+	}
+	r.mu.Unlock()
+
+	return image, nil
 }
 
 func (r *LocalRunner) Start(req StartRequest) (SandboxHandle, error) {
@@ -64,6 +126,13 @@ func (r *LocalRunner) Start(req StartRequest) (SandboxHandle, error) {
 	}
 	if req.EngineMode == "" {
 		req.EngineMode = "normal"
+	}
+
+	r.mu.Lock()
+	image := r.images[req.ImageRef]
+	r.mu.Unlock()
+	if image == nil {
+		return SandboxHandle{}, fmt.Errorf("unknown image_ref %q; build it first", req.ImageRef)
 	}
 
 	port, err := freePort()
@@ -82,14 +151,11 @@ func (r *LocalRunner) Start(req StartRequest) (SandboxHandle, error) {
 		return SandboxHandle{}, err
 	}
 
-	engineDir := filepath.Join(r.repoRoot, "examples", "stub-engine")
-	binaryPath := filepath.Join(dir, "stub-engine")
-	_, _ = fmt.Fprintf(logFile, "$ (cd %s && go build -o %s .)\n", engineDir, binaryPath)
-	buildCmd := exec.Command("go", "build", "-o", binaryPath, ".")
-	buildCmd.Dir = engineDir
-	buildCmd.Stdout = logFile
-	buildCmd.Stderr = logFile
-	if err := buildCmd.Run(); err != nil {
+	eventsPath := req.EventsPath
+	if eventsPath == "" {
+		eventsPath = filepath.Join(dir, "engine-events.jsonl")
+	}
+	if err := os.MkdirAll(filepath.Dir(eventsPath), 0o755); err != nil {
 		_ = logFile.Close()
 		return SandboxHandle{}, err
 	}
@@ -97,12 +163,12 @@ func (r *LocalRunner) Start(req StartRequest) (SandboxHandle, error) {
 	args := []string{
 		"--addr", fmt.Sprintf(":%d", port),
 		"--mode", req.EngineMode,
-		"--events", filepath.Join(dir, "engine-events.jsonl"),
+		"--events", eventsPath,
 	}
-	_, _ = fmt.Fprintf(logFile, "$ %s %v\n", binaryPath, args)
+	_, _ = fmt.Fprintf(logFile, "$ %s %v\n", image.binaryPath, args)
 
-	cmd := exec.Command(binaryPath, args...)
-	cmd.Dir = engineDir
+	cmd := exec.Command(image.binaryPath, args...)
+	cmd.Dir = image.buildDir
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {

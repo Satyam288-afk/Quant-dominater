@@ -26,6 +26,7 @@ type StartRequest struct {
 	RunID      string      `json:"run_id"`
 	ImageRef   string      `json:"image_ref"`
 	EngineMode string      `json:"engine_mode"`
+	EventsPath string      `json:"events_path,omitempty"`
 	Spec       SandboxSpec `json:"spec"`
 }
 

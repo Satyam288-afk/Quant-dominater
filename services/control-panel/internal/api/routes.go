@@ -3,6 +3,7 @@ package api
 import "net/http"
 
 func RegisterRoutes(mux *http.ServeMux, h *Handler) {
+	mux.HandleFunc("GET /health", h.Health)
 	mux.HandleFunc("POST /api/runs", h.CreateRun)
 	mux.HandleFunc("GET /api/runs", h.ListRuns)
 	mux.HandleFunc("GET /api/runs/{run_id}", h.GetRun)

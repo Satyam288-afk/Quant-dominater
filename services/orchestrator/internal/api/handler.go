@@ -14,6 +14,7 @@ type Manager interface {
 	StartRun(ctx context.Context, runID string) (*model.BenchmarkRun, error)
 	StartNextQueued(ctx context.Context) (*model.BenchmarkRun, error)
 	CancelRun(ctx context.Context, runID string) (*model.BenchmarkRun, error)
+	BenchmarkEndpoint(ctx context.Context, req model.DirectBenchmarkRequest) (*model.DirectBenchmarkResult, error)
 }
 
 type RunStore interface {
@@ -31,8 +32,7 @@ func NewHandler(manager Manager, store RunStore) *Handler {
 }
 
 func (h *Handler) Health(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte("OK\n"))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *Handler) ListRuns(w http.ResponseWriter, r *http.Request) {
@@ -78,6 +78,22 @@ func (h *Handler) CancelRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, run)
+}
+
+func (h *Handler) BenchmarkEndpoint(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+
+	var req model.DirectBenchmarkRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	result, err := h.manager.BenchmarkEndpoint(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func handleStoreError(w http.ResponseWriter, err error) {

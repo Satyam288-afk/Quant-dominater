@@ -1,4 +1,23 @@
-.PHONY: test-rust bot-fleet validator stub-engine validate-fixture control-panel submission-api sandbox-runner orchestrator
+.PHONY: proto-go test-go test-rust bot-fleet validator stub-engine rust-engine validate-fixture control-panel submission-api sandbox-runner orchestrator score-engine leaderboard-api
+
+PROTOC_GEN_GO ?= $(shell go env GOPATH)/bin/protoc-gen-go
+
+proto-go:
+	mkdir -p shared/go
+	protoc --plugin=protoc-gen-go=$(PROTOC_GEN_GO) \
+		--go_out=shared/go \
+		--go_opt=module=github.com/iicpc/benchmark-platform/shared/go \
+		proto/benchmark.proto
+
+test-go:
+	cd shared/go && go test ./...
+	cd examples/stub-engine && go test ./...
+	cd services/control-panel && go test ./...
+	cd services/submission-api && go test ./...
+	cd services/sandbox-runner && go test ./...
+	cd services/orchestrator && go test ./...
+	cd services/score-engine && go test ./...
+	cd services/leaderboard-api && go test ./...
 
 test-rust:
 	cargo test --workspace
@@ -15,6 +34,9 @@ validate-fixture:
 stub-engine:
 	cd examples/stub-engine && go run . --addr :8080 --events engine-events.jsonl
 
+rust-engine:
+	cargo run -p rust-engine -- --addr :8080 --events engine-events.jsonl
+
 control-panel:
 	cd services/control-panel && REPO_ROOT=$(CURDIR) go run .
 
@@ -26,3 +48,9 @@ sandbox-runner:
 
 orchestrator:
 	cd services/orchestrator && REPO_ROOT=$(CURDIR) go run .
+
+score-engine:
+	cd services/score-engine && REPO_ROOT=$(CURDIR) go run .
+
+leaderboard-api:
+	cd services/leaderboard-api && REPO_ROOT=$(CURDIR) go run .

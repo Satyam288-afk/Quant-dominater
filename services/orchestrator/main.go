@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"orchestrator/internal/api"
 	"orchestrator/internal/executor"
@@ -20,13 +23,41 @@ func main() {
 	}
 
 	st := store.NewJSONStore(filepath.Join(repoRoot, ".artifacts", "submissions", "index.json"))
+	sandboxRunnerURL := os.Getenv("SANDBOX_RUNNER_URL")
+	if sandboxRunnerURL == "" {
+		sandboxRunnerURL = "http://127.0.0.1:9200"
+	}
+	runTimeout := 3 * time.Minute
+	if value := os.Getenv("ORCHESTRATOR_RUN_TIMEOUT"); value != "" {
+		parsed, err := time.ParseDuration(value)
+		if err != nil {
+			log.Fatalf("invalid ORCHESTRATOR_RUN_TIMEOUT %q: %v", value, err)
+		}
+		runTimeout = parsed
+	}
 	runner := orchestrator.NewManager(
 		st,
-		executor.NewLocalEngine(repoRoot),
+		executor.NewSandboxEngine(sandboxRunnerURL),
 		executor.NewBotFleet(repoRoot),
 		executor.NewValidator(repoRoot),
 		filepath.Join(repoRoot, ".runs"),
+		runTimeout,
 	)
+	autoStart := envBool("ORCHESTRATOR_AUTO_START", true)
+	pollInterval := 2 * time.Second
+	if value := os.Getenv("ORCHESTRATOR_POLL_INTERVAL"); value != "" {
+		parsed, err := time.ParseDuration(value)
+		if err != nil {
+			log.Fatalf("invalid ORCHESTRATOR_POLL_INTERVAL %q: %v", value, err)
+		}
+		pollInterval = parsed
+	}
+	if leaderboardURL := os.Getenv("LEADERBOARD_URL"); leaderboardURL != "" {
+		runner.SetLeaderboardPublisher(executor.NewLeaderboardPublisher(leaderboardURL))
+	}
+	if autoStart {
+		runner.StartWorker(context.Background(), pollInterval)
+	}
 
 	handler := api.NewHandler(runner, st)
 	mux := http.NewServeMux()
@@ -37,8 +68,23 @@ func main() {
 		addr = ":9300"
 	}
 
-	log.Printf("orchestrator listening on %s repo_root=%s", addr, repoRoot)
+	log.Printf("orchestrator listening on %s repo_root=%s sandbox_runner_url=%s run_timeout=%s auto_start=%t poll_interval=%s", addr, repoRoot, sandboxRunnerURL, runTimeout, autoStart, pollInterval)
 	log.Fatal(http.ListenAndServe(addr, mux))
+}
+
+func envBool(name string, fallback bool) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+	if value == "" {
+		return fallback
+	}
+	switch value {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func resolveRepoRoot() (string, error) {

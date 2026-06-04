@@ -2,7 +2,8 @@
 
 Vertical-slice implementation for the IICPC distributed trading engine benchmark.
 
-This repo starts with the smallest working benchmark core:
+This repo started with the smallest working benchmark core and now layers Go
+control-plane services on top of it:
 
 ```text
 Stub trading engine
@@ -12,7 +13,9 @@ Stub trading engine
   -> validator prints VALID / INVALID
 ```
 
-Kubernetes, Terraform, Redpanda, Redis, MinIO, and sandboxing are intentionally left as later layers. The first milestone is proving that the platform can measure speed and gate correctness.
+Kubernetes, Terraform, Redpanda, Redis, and MinIO are later layers. The current
+milestone is a real local platform loop: submission metadata, sandbox boundary,
+orchestration, benchmark execution, validation, and scoring artifacts.
 
 ## Current Components
 
@@ -21,9 +24,12 @@ Kubernetes, Terraform, Redpanda, Redis, MinIO, and sandboxing are intentionally 
 | `docs/API_CONTRACT.md` | WebSocket/REST message contract |
 | `proto/benchmark.proto` | Protobuf version of the benchmark messages |
 | `examples/stub-engine` | Go WebSocket/REST contestant engine stub |
+| `examples/rust-engine` | Rust WebSocket contestant engine stub |
 | `services/submission-api` | Go API for storing submissions and queued run records |
-| `services/sandbox-runner` | Go sandbox service boundary with a local runner |
+| `services/sandbox-runner` | Go sandbox service boundary with local and Docker modes |
 | `services/orchestrator` | Go lifecycle manager for queued benchmark runs |
+| `services/score-engine` | Go scoring API for local run artifacts |
+| `services/leaderboard-api` | Go live leaderboard API with WebSocket fanout |
 | `rust/bot-fleet` | Rust Tokio bot fleet and local metrics collector |
 | `rust/reference-orderbook` | Deterministic price-time reference matcher |
 | `rust/validator` | Replays inputs and compares contestant fills |
@@ -34,7 +40,8 @@ Kubernetes, Terraform, Redpanda, Redis, MinIO, and sandboxing are intentionally 
 
 ## Prerequisites
 
-Install Go and Rust locally:
+Install Go and Rust locally. The Docker-backed sandbox runner uses the Docker
+SDK dependency set and should be built with Go 1.25+.
 
 ```bash
 go version
@@ -47,14 +54,13 @@ cargo --version
 Terminal 1:
 
 ```bash
-cd /Users/satyamkumar/iicpc/examples/stub-engine
+cd examples/stub-engine
 go run . --addr :8080 --events engine-events.jsonl
 ```
 
 Terminal 2:
 
 ```bash
-cd /Users/satyamkumar/iicpc
 cargo run -p bot-fleet --bin bot-fleet -- \
   --target ws://localhost:8080/ws \
   --bots 100 \
@@ -99,6 +105,29 @@ List runs:
 
 ```bash
 curl http://localhost:9000/api/runs
+```
+
+## Run The Platform Services
+
+Start the three control-plane services in separate terminals:
+
+```bash
+make submission-api
+make sandbox-runner
+make orchestrator
+```
+
+Optional services:
+
+```bash
+make score-engine
+make leaderboard-api
+```
+
+Use Docker-backed sandboxing when Docker is running:
+
+```bash
+SANDBOX_RUNNER_MODE=docker make sandbox-runner
 ```
 
 ## Prove The Validator Is Real

@@ -29,6 +29,10 @@ func NewHandler(manager *run.Manager, store run.Store) *Handler {
 	return &Handler{manager: manager, store: store}
 }
 
+func (h *Handler) Health(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (h *Handler) CreateRun(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 

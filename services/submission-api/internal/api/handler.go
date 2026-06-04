@@ -33,17 +33,19 @@ type Handler struct {
 	artifacts ArtifactStore
 }
 
+const maxSubmissionBytes = 64 << 20
+
 func NewHandler(store SubmissionStore, artifacts ArtifactStore) *Handler {
 	return &Handler{store: store, artifacts: artifacts}
 }
 
 func (h *Handler) Health(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte("OK\n"))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *Handler) CreateSubmission(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(64 << 20); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, maxSubmissionBytes)
+	if err := r.ParseMultipartForm(maxSubmissionBytes); err != nil {
 		writeError(w, http.StatusBadRequest, "expected multipart/form-data with artifact file")
 		return
 	}
