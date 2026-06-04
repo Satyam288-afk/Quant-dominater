@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package benchmark.v1;
 
-option go_package = "github.com/Satyam288-afk/Quant-dominater/proto/benchmark/v1;benchmarkv1";
+option go_package = "github.com/iicpc/benchmark-platform/shared/go/benchmark/v1;benchmarkv1";
 
 enum Side {
   SIDE_UNSPECIFIED = 0;

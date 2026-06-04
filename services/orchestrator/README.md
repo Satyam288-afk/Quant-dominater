@@ -51,10 +51,25 @@ POST /api/benchmark
 
 1. Create a submission with `services/submission-api`.
 2. Create a queued run with `POST /submissions/{submission_id}/runs`.
-3. Start the next queued run:
+3. Start the orchestrator. By default it polls for queued runs every two
+   seconds and starts them automatically.
+
+You can also start the next queued run manually:
 
 ```bash
 curl -X POST http://localhost:9300/runs/next
+```
+
+Disable the worker with:
+
+```bash
+ORCHESTRATOR_AUTO_START=false make orchestrator
+```
+
+Publish finished run scores to the leaderboard API with:
+
+```bash
+LEADERBOARD_URL=http://127.0.0.1:9500 make orchestrator
 ```
 
 The run moves through:

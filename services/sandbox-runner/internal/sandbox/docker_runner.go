@@ -92,11 +92,15 @@ func (r *DockerRunner) Build(req BuildRequest) (ImageRef, error) {
 	if err != nil {
 		return ImageRef{}, err
 	}
-	resp, err := cli.ImageBuild(ctx, buildContext, types.ImageBuildOptions{
+	buildOptions := types.ImageBuildOptions{
 		Tags:        []string{imageTag},
 		Remove:      true,
 		ForceRemove: true,
-	})
+	}
+	if dockerBuildKitEnabled() {
+		buildOptions.Version = types.BuilderBuildKit
+	}
+	resp, err := cli.ImageBuild(ctx, buildContext, buildOptions)
 	if err != nil {
 		return ImageRef{}, fmt.Errorf("docker image build failed: %w", err)
 	}
@@ -189,6 +193,7 @@ func (r *DockerRunner) Start(req StartRequest) (SandboxHandle, error) {
 			CapDrop:        []string{"ALL"},
 			NetworkMode:    "bridge",
 			ReadonlyRootfs: true,
+			Runtime:        strings.TrimSpace(os.Getenv("SANDBOX_DOCKER_RUNTIME")),
 			Resources: container.Resources{
 				Memory:    parseDockerMemoryBytes(req.Spec.MemoryLimit),
 				NanoCPUs:  parseDockerNanoCPUs(req.Spec.CPULimit),
@@ -429,6 +434,15 @@ func sanitizeDockerTag(value string) string {
 		return value[:80]
 	}
 	return value
+}
+
+func dockerBuildKitEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("SANDBOX_DOCKER_BUILDKIT"))) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeDockerCPUs(value string) string {

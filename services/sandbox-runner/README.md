@@ -5,13 +5,13 @@ Go service boundary for building and running contestant engines.
 This is intentionally local-first but now has two runner modes:
 
 ```text
-local  - starts the built-in Go stub engine directly
+local  - builds submitted Go artifacts and starts the binary directly
 docker - builds a submitted artifact into a Docker image and runs it
 ```
 
 The Docker runner uses the Docker SDK to build images and create containers with
 CPU, memory, PID, capability, and no-new-privileges settings. BuildKit and gVisor
-are still future hardening layers.
+are opt-in when available on the host.
 
 ## Run
 
@@ -32,6 +32,15 @@ Use Docker mode with:
 
 ```bash
 SANDBOX_RUNNER_MODE=docker make sandbox-runner
+```
+
+Use BuildKit and gVisor/runsc when Docker is configured for them:
+
+```bash
+SANDBOX_RUNNER_MODE=docker \
+SANDBOX_DOCKER_BUILDKIT=true \
+SANDBOX_DOCKER_RUNTIME=runsc \
+make sandbox-runner
 ```
 
 ## Endpoints
@@ -59,7 +68,8 @@ curl -X POST http://localhost:9200/sandboxes/start \
   -d '{"run_id":"run_1","image_ref":"local://sub_1","engine_mode":"normal","events_path":".runs/run_1/engine_outputs.jsonl"}'
 ```
 
-This starts a local stub engine and returns a WebSocket endpoint.
+This builds the submitted artifact into a local binary, starts it, and returns a
+WebSocket endpoint.
 
 In Docker mode, use the `image_ref` returned from `/sandboxes/build`; it will
 use the `docker://...` scheme.

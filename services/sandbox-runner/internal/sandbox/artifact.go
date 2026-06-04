@@ -72,7 +72,7 @@ func writeDefaultDockerfile(dir string, language string) error {
 		return os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(`FROM golang:1.22-alpine AS build
 WORKDIR /src
 COPY . .
-RUN go mod download
+RUN go mod tidy
 RUN go build -o /engine .
 
 FROM alpine:3.20

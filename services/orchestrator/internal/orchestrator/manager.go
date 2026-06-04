@@ -39,11 +39,16 @@ type Validator interface {
 	Run(ctx context.Context, run *model.BenchmarkRun) (*model.ValidationResult, error)
 }
 
+type LeaderboardPublisher interface {
+	Publish(ctx context.Context, run *model.BenchmarkRun, metrics *model.Metrics, validation *model.ValidationResult, score model.ScoreResult) error
+}
+
 type Manager struct {
 	store      Store
 	engine     Engine
 	botfleet   BotFleet
 	validator  Validator
+	publisher  LeaderboardPublisher
 	runRoot    string
 	runTimeout time.Duration
 
@@ -64,6 +69,10 @@ func NewManager(store Store, engine Engine, botfleet BotFleet, validator Validat
 		runTimeout: runTimeout,
 		cancels:    make(map[string]context.CancelFunc),
 	}
+}
+
+func (m *Manager) SetLeaderboardPublisher(publisher LeaderboardPublisher) {
+	m.publisher = publisher
 }
 
 func (m *Manager) StartRun(ctx context.Context, runID string) (*model.BenchmarkRun, error) {
@@ -96,6 +105,44 @@ func (m *Manager) StartNextQueued(ctx context.Context) (*model.BenchmarkRun, err
 
 	go m.execute(runCtx, run)
 	return run, nil
+}
+
+func (m *Manager) StartWorker(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			m.claimAvailable(ctx)
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+}
+
+func (m *Manager) claimAvailable(ctx context.Context) {
+	for {
+		run, err := m.StartNextQueued(ctx)
+		if err == nil {
+			slog.Info("orchestrator worker claimed run", "run_id", run.RunID)
+			continue
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		slog.Error("orchestrator worker failed to claim run", "err", err)
+		return
+	}
 }
 
 func (m *Manager) CancelRun(ctx context.Context, runID string) (*model.BenchmarkRun, error) {
@@ -193,6 +240,7 @@ func (m *Manager) BenchmarkEndpoint(ctx context.Context, req model.DirectBenchma
 	run.FinishedAtUnix = now.Unix()
 	_ = m.writeRunSpec(run)
 	_ = appendRunLog(run, "direct benchmark finished")
+	m.publishLeaderboard(runCtx, run, metrics, validation, score)
 
 	return &model.DirectBenchmarkResult{
 		Run:        run,
@@ -303,7 +351,18 @@ func (m *Manager) execute(ctx context.Context, run *model.BenchmarkRun) {
 	_ = m.writeRunSpec(run)
 	_ = m.store.SaveRun(context.Background(), run)
 	_ = appendRunLog(run, "orchestrator run finished")
+	m.publishLeaderboard(ctx, run, metrics, validation, score)
 	slog.Info("orchestrator run finished", "run_id", run.RunID, "valid", validation.Valid, "score", run.Score)
+}
+
+func (m *Manager) publishLeaderboard(ctx context.Context, run *model.BenchmarkRun, metrics *model.Metrics, validation *model.ValidationResult, score model.ScoreResult) {
+	if m.publisher == nil {
+		return
+	}
+	if err := m.publisher.Publish(ctx, run, metrics, validation, score); err != nil {
+		_ = appendRunLog(run, "leaderboard publish failed: "+err.Error())
+		slog.Error("leaderboard publish failed", "run_id", run.RunID, "err", err)
+	}
 }
 
 func (m *Manager) finishDirectFailure(ctx context.Context, run *model.BenchmarkRun, stage string, err error, metrics *model.Metrics, validation *model.ValidationResult, score *model.ScoreResult) *model.DirectBenchmarkResult {

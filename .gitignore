@@ -17,6 +17,7 @@ vendor/
 # Environment / Runs
 .runs/
 .artifacts/
+.leaderboard/
 .env
 
 # Stray artifacts dropped at repo root when binaries are invoked with
