@@ -46,13 +46,15 @@ type sandboxStartRequest struct {
 }
 
 type sandboxHandle struct {
-	SandboxID string            `json:"sandbox_id"`
-	RunID     string            `json:"run_id"`
-	ImageRef  string            `json:"image_ref"`
-	Endpoint  string            `json:"endpoint"`
-	HealthURL string            `json:"health_url"`
-	Spec      model.SandboxSpec `json:"spec"`
-	StartedAt time.Time         `json:"started_at"`
+	SandboxID       string            `json:"sandbox_id"`
+	RunID           string            `json:"run_id"`
+	ImageRef        string            `json:"image_ref"`
+	Endpoint        string            `json:"endpoint"`
+	HealthURL       string            `json:"health_url"`
+	Spec            model.SandboxSpec `json:"spec"`
+	NetworkName     string            `json:"network_name,omitempty"`
+	NetworkIsolated bool              `json:"network_isolated,omitempty"`
+	StartedAt       time.Time         `json:"started_at"`
 }
 
 func NewSandboxEngine(baseURL string) *SandboxEngine {

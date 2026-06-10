@@ -17,8 +17,8 @@ func main() {
 		log.Fatal(err)
 	}
 
-	artifactRoot := filepath.Join(repoRoot, ".artifacts", "submissions")
-	indexPath := filepath.Join(artifactRoot, "index.json")
+	artifactRoot := envPath("SUBMISSION_ARTIFACT_ROOT", filepath.Join(repoRoot, ".artifacts", "submissions"))
+	indexPath := envPath("SUBMISSION_INDEX_PATH", filepath.Join(artifactRoot, "index.json"))
 
 	st := store.NewJSONStore(indexPath)
 	artifacts := store.NewLocalArtifactStore(artifactRoot)
@@ -64,4 +64,16 @@ func resolveRepoRoot() (string, error) {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func envPath(name string, fallback string) string {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	abs, err := filepath.Abs(value)
+	if err != nil {
+		return value
+	}
+	return abs
 }

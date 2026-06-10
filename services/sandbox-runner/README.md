@@ -10,8 +10,9 @@ docker - builds a submitted artifact into a Docker image and runs it
 ```
 
 The Docker runner uses the Docker SDK to build images and create containers with
-CPU, memory, PID, capability, and no-new-privileges settings. BuildKit and gVisor
-are opt-in when available on the host.
+CPU, memory, PID, capability, read-only root filesystem, and
+no-new-privileges settings. BuildKit and gVisor are opt-in when available on the
+host.
 
 ## Run
 
@@ -41,6 +42,13 @@ SANDBOX_RUNNER_MODE=docker \
 SANDBOX_DOCKER_BUILDKIT=true \
 SANDBOX_DOCKER_RUNTIME=runsc \
 make sandbox-runner
+```
+
+For isolated local demos, point `local://submissions/...` artifacts at a custom
+submission root:
+
+```bash
+SUBMISSION_ARTIFACT_ROOT=.runs/platform-demo/submissions make sandbox-runner
 ```
 
 ## Endpoints
@@ -116,3 +124,9 @@ If `engine_mode` is provided, it also passes:
 
 Docker mode publishes the engine on a random localhost port and mounts the run
 artifact directory at `/artifacts`.
+
+When `spec.network_egress=false`, Docker mode creates a per-sandbox internal
+bridge network and starts the contestant container on that network. The platform
+still publishes the engine endpoint on `127.0.0.1` for the local bot fleet, but
+the container does not receive normal outbound internet routing. The network is
+removed with the container during sandbox cleanup.

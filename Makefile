@@ -1,4 +1,4 @@
-.PHONY: proto-go test-go test-rust bot-fleet validator stub-engine rust-engine validate-fixture control-panel submission-api sandbox-runner orchestrator score-engine leaderboard-api
+.PHONY: proto-go test-go test-rust bot-fleet validator stub-engine rust-engine validate-fixture control-panel submission-api sandbox-runner orchestrator score-engine leaderboard-api console-api platform-demo console-stack reset-demo-state
 
 PROTOC_GEN_GO ?= $(shell go env GOPATH)/bin/protoc-gen-go
 
@@ -18,6 +18,7 @@ test-go:
 	cd services/orchestrator && go test ./...
 	cd services/score-engine && go test ./...
 	cd services/leaderboard-api && go test ./...
+	cd services/console-api && go test ./...
 
 test-rust:
 	cargo test --workspace
@@ -54,3 +55,17 @@ score-engine:
 
 leaderboard-api:
 	cd services/leaderboard-api && REPO_ROOT=$(CURDIR) go run .
+
+console-api:
+	cd services/console-api && REPO_ROOT=$(CURDIR) go run .
+
+platform-demo:
+	./scripts/run-platform-demo.sh
+
+console-stack:
+	./scripts/run-console-stack.sh
+
+reset-demo-state:
+	rm -f .leaderboard/leaderboard.json
+	rm -f .runs/platform-demo/leaderboard-store*.json
+	rm -f .runs/platform-demo/*.json .runs/platform-demo/*.log .runs/platform-demo/*.zip

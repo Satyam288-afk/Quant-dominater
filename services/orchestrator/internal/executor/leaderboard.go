@@ -18,17 +18,29 @@ type LeaderboardPublisher struct {
 }
 
 type leaderboardEntry struct {
-	RunID         string    `json:"run_id"`
-	TeamID        string    `json:"team_id"`
-	Score         float64   `json:"score"`
-	Valid         bool      `json:"valid"`
-	Status        string    `json:"status,omitempty"`
-	FailureReason string    `json:"failure_reason,omitempty"`
-	P50MS         float64   `json:"p50_ms,omitempty"`
-	P90MS         float64   `json:"p90_ms,omitempty"`
-	P99MS         float64   `json:"p99_ms,omitempty"`
-	TPS           float64   `json:"tps,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	RunID           string    `json:"run_id"`
+	TeamID          string    `json:"team_id"`
+	Score           float64   `json:"score"`
+	Valid           bool      `json:"valid"`
+	Status          string    `json:"status,omitempty"`
+	FailureReason   string    `json:"failure_reason,omitempty"`
+	OrdersSent      int       `json:"orders_sent,omitempty"`
+	AcksReceived    int       `json:"acks_received,omitempty"`
+	FillsReceived   int       `json:"fills_received,omitempty"`
+	Timeouts        int       `json:"timeouts,omitempty"`
+	ConnectErrors   int       `json:"connect_errors,omitempty"`
+	FillsChecked    int       `json:"fills_checked,omitempty"`
+	P50MS           float64   `json:"p50_ms,omitempty"`
+	P90MS           float64   `json:"p90_ms,omitempty"`
+	P99MS           float64   `json:"p99_ms,omitempty"`
+	TPS             float64   `json:"tps,omitempty"`
+	LatencyScore    float64   `json:"latency_score,omitempty"`
+	ThroughputScore float64   `json:"throughput_score,omitempty"`
+	StabilityScore  float64   `json:"stability_score,omitempty"`
+	ResourceScore   float64   `json:"resource_score,omitempty"`
+	CorrectnessGate string    `json:"correctness_gate,omitempty"`
+	ArtifactDir     string    `json:"artifact_dir,omitempty"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 func NewLeaderboardPublisher(baseURL string) *LeaderboardPublisher {
@@ -43,25 +55,37 @@ func (p *LeaderboardPublisher) Publish(ctx context.Context, run *model.Benchmark
 		return nil
 	}
 	entry := leaderboardEntry{
-		RunID:     run.RunID,
-		TeamID:    run.TeamID,
-		Score:     score.Score,
-		Valid:     score.Valid,
-		Status:    string(run.Status),
-		UpdatedAt: time.Now(),
+		RunID:       run.RunID,
+		TeamID:      run.TeamID,
+		Score:       score.Score,
+		Valid:       score.Valid,
+		Status:      string(run.Status),
+		ArtifactDir: run.ArtifactDir,
+		UpdatedAt:   time.Now(),
 	}
 	if validation != nil {
 		entry.FailureReason = validation.Reason
+		entry.FillsChecked = validation.FillsChecked
 	}
 	if run.FailureReason != "" {
 		entry.FailureReason = run.FailureReason
 	}
 	if metrics != nil {
+		entry.OrdersSent = metrics.OrdersSent
+		entry.AcksReceived = metrics.AcksReceived
+		entry.FillsReceived = metrics.FillsReceived
+		entry.Timeouts = metrics.Timeouts
+		entry.ConnectErrors = metrics.ConnectErrors
 		entry.P50MS = metrics.P50MS
 		entry.P90MS = metrics.P90MS
 		entry.P99MS = metrics.P99MS
 		entry.TPS = metrics.TPS
 	}
+	entry.LatencyScore = score.LatencyScore
+	entry.ThroughputScore = score.ThroughputScore
+	entry.StabilityScore = score.StabilityScore
+	entry.ResourceScore = score.ResourceScore
+	entry.CorrectnessGate = score.CorrectnessGate
 
 	body, err := json.Marshal(entry)
 	if err != nil {

@@ -11,17 +11,29 @@ import (
 )
 
 type Entry struct {
-	RunID         string    `json:"run_id"`
-	TeamID        string    `json:"team_id"`
-	Score         float64   `json:"score"`
-	Valid         bool      `json:"valid"`
-	Status        string    `json:"status,omitempty"`
-	FailureReason string    `json:"failure_reason,omitempty"`
-	P50MS         float64   `json:"p50_ms,omitempty"`
-	P90MS         float64   `json:"p90_ms,omitempty"`
-	P99MS         float64   `json:"p99_ms,omitempty"`
-	TPS           float64   `json:"tps,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	RunID           string    `json:"run_id"`
+	TeamID          string    `json:"team_id"`
+	Score           float64   `json:"score"`
+	Valid           bool      `json:"valid"`
+	Status          string    `json:"status,omitempty"`
+	FailureReason   string    `json:"failure_reason,omitempty"`
+	OrdersSent      int       `json:"orders_sent,omitempty"`
+	AcksReceived    int       `json:"acks_received,omitempty"`
+	FillsReceived   int       `json:"fills_received,omitempty"`
+	Timeouts        int       `json:"timeouts,omitempty"`
+	ConnectErrors   int       `json:"connect_errors,omitempty"`
+	FillsChecked    int       `json:"fills_checked,omitempty"`
+	P50MS           float64   `json:"p50_ms,omitempty"`
+	P90MS           float64   `json:"p90_ms,omitempty"`
+	P99MS           float64   `json:"p99_ms,omitempty"`
+	TPS             float64   `json:"tps,omitempty"`
+	LatencyScore    float64   `json:"latency_score,omitempty"`
+	ThroughputScore float64   `json:"throughput_score,omitempty"`
+	StabilityScore  float64   `json:"stability_score,omitempty"`
+	ResourceScore   float64   `json:"resource_score,omitempty"`
+	CorrectnessGate string    `json:"correctness_gate,omitempty"`
+	ArtifactDir     string    `json:"artifact_dir,omitempty"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type Board struct {

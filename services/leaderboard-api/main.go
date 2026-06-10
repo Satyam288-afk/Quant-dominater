@@ -45,6 +45,13 @@ func main() {
 	mux.HandleFunc("GET /leaderboard", handler.List)
 	mux.HandleFunc("POST /leaderboard/runs", handler.Upsert)
 	mux.HandleFunc("GET /ws", handler.WS)
+	uiDir := os.Getenv("LEADERBOARD_UI_DIR")
+	if uiDir == "" {
+		uiDir = filepath.Join(repoRoot, "web", "leaderboard-ui")
+	}
+	if fileExists(filepath.Join(uiDir, "index.html")) {
+		mux.Handle("GET /", http.FileServer(http.Dir(uiDir)))
+	}
 
 	addr := os.Getenv("LEADERBOARD_API_ADDR")
 	if addr == "" {

@@ -35,6 +35,17 @@ Runs are capped by `ORCHESTRATOR_RUN_TIMEOUT`, defaulting to `3m`:
 ORCHESTRATOR_RUN_TIMEOUT=90s make orchestrator
 ```
 
+Use an isolated metadata store when running demos beside another orchestrator:
+
+```bash
+ORCHESTRATOR_STORE_PATH=.runs/platform-demo/submissions/index.json \
+ORCHESTRATOR_AUTO_START=false \
+make orchestrator
+```
+
+Only one auto-starting orchestrator should watch a given store path. Otherwise,
+whichever worker claims a queued run first owns that run.
+
 ## Endpoints
 
 ```text

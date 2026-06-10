@@ -52,3 +52,47 @@ func TestBoardBroadcastsSnapshot(t *testing.T) {
 		t.Fatal("expected update snapshot")
 	}
 }
+
+func TestBoardPersistsDetailedMetrics(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "leaderboard.json")
+	b, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = b.Upsert(Entry{
+		RunID:           "run_1",
+		TeamID:          "team_1",
+		Score:           87.5,
+		Valid:           true,
+		Status:          "FINISHED",
+		OrdersSent:      1000,
+		AcksReceived:    998,
+		FillsReceived:   550,
+		Timeouts:        2,
+		FillsChecked:    550,
+		P99MS:           12.5,
+		TPS:             499,
+		LatencyScore:    90,
+		ThroughputScore: 95,
+		StabilityScore:  99,
+		ResourceScore:   75,
+		CorrectnessGate: "passed",
+		ArtifactDir:     "/tmp/run_1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := reloaded.List()
+	if len(entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(entries))
+	}
+	got := entries[0]
+	if got.OrdersSent != 1000 || got.Timeouts != 2 || got.CorrectnessGate != "passed" || got.ArtifactDir != "/tmp/run_1" {
+		t.Fatalf("detailed metrics were not persisted: %+v", got)
+	}
+}
