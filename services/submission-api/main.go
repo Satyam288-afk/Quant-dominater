@@ -1,17 +1,24 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	"submission-api/internal/api"
 	"submission-api/internal/store"
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
 	repoRoot, err := resolveRepoRoot()
 	if err != nil {
 		log.Fatal(err)
@@ -32,8 +39,24 @@ func main() {
 		addr = ":9100"
 	}
 
-	log.Printf("submission API listening on %s repo_root=%s artifact_root=%s", addr, repoRoot, artifactRoot)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		log.Printf("submission API listening on %s repo_root=%s artifact_root=%s", addr, repoRoot, artifactRoot)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("listen: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	stop()
+	log.Printf("shutdown signal received; draining in-flight requests")
+	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutCtx); err != nil {
+		log.Printf("shutdown: %v", err)
+	} else {
+		log.Printf("submission API drained cleanly")
+	}
 }
 
 func resolveRepoRoot() (string, error) {

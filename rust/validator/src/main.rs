@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -33,6 +33,13 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
     let (run_id, events) = replay::read_events(&args.events)?;
+    // Reconstruct the engine's authoritative arrival order from the ack
+    // engine_seq, then replay in that order. Under concurrent multi-bot load the
+    // events.jsonl line order is the bots' *send* order, not the order the
+    // engine serialised and processed orders in — replaying in send order
+    // produces spurious price-time-priority diffs for a correct engine.
+    let arrival_seq = read_arrival_order(&args.contestant_outputs)?;
+    let events = replay::order_by_engine_seq(events, &arrival_seq);
     let expected: Vec<Fill> = replay::replay_expected_fills(&events, args.shards);
     let (raw_actual, deduped_actual) = read_actual_fills(&args.contestant_outputs)?;
 
@@ -98,6 +105,40 @@ fn read_actual_fills(path: &PathBuf) -> Result<(Vec<ActualFill>, Vec<ActualFill>
     }
 
     Ok((raw, deduped))
+}
+
+/// Build a map of `client_order_id -> engine_seq` from every ack the contestant
+/// sent — new-order acks AND cancel acks, regardless of status. The engine
+/// stamps a monotonic `engine_seq` on each ack at the moment it processes the
+/// request, so this map is the engine's authoritative *arrival* sequence, which
+/// the replay uses to reconstruct the true processing order under concurrency.
+/// New-order and cancel ids never collide, so one map orders both.
+fn read_arrival_order(path: &PathBuf) -> Result<HashMap<String, u64>> {
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut arrival_seq = HashMap::new();
+
+    for (line_no, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| format!("read {}:{}", path.display(), line_no + 1))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(&line)
+            .with_context(|| format!("parse {}:{}", path.display(), line_no + 1))?;
+        let Some(ack) = extract_message(&value, "ack") else {
+            continue;
+        };
+        let (Some(coid), Some(seq)) = (
+            ack.get("client_order_id").and_then(Value::as_str),
+            ack.get("engine_seq").and_then(Value::as_u64),
+        ) else {
+            continue;
+        };
+        // First ack wins (a re-ack would only ever be a duplicate delivery).
+        arrival_seq.entry(coid.to_string()).or_insert(seq);
+    }
+
+    Ok(arrival_seq)
 }
 
 fn extract_message<'a>(value: &'a Value, expected_type: &str) -> Option<&'a Value> {

@@ -1,0 +1,31 @@
+# Shared, non-secret service discovery + tuning. Every service reads these
+# in-cluster DNS names. Secrets (DB creds, full DSN) live in the Secret below.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: platform-config
+  namespace: iicpc
+data:
+  KAFKA_BROKERS: "redpanda.iicpc.svc.cluster.local:9092"
+  KAFKA_TELEMETRY_TOPIC: "telemetry.events.v1"
+  KAFKA_GROUP_ID: "telemetry-ingester"
+  REDIS_URL: "redis://redis.iicpc.svc.cluster.local:6379/"
+  TIMESCALE_HOST: "timescaledb.iicpc.svc.cluster.local"
+  TIMESCALE_PORT: "5432"
+  TIMESCALE_DB: "bench"
+  LEADERBOARD_BACKEND: "redis"
+  LEADERBOARD_API_ADDR: ":9500"
+---
+# Demo credentials only. In a real deployment these are injected from a secrets
+# manager (AWS Secrets Manager / External Secrets Operator) — see Terraform.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db-credentials
+  namespace: iicpc
+type: Opaque
+stringData:
+  POSTGRES_USER: "bench"
+  POSTGRES_PASSWORD: "bench"
+  POSTGRES_DB: "bench"
+  TIMESCALE_URL: "postgres://bench:bench@timescaledb.iicpc.svc.cluster.local:5432/bench"

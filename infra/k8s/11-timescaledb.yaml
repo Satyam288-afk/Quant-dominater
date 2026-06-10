@@ -1,0 +1,56 @@
+# TimescaleDB = durable metrics store (metrics_raw hypertable + scores table).
+# Single instance for the cell; production uses a managed Postgres/Timescale
+# with replicas. Schema is loaded from the timescale-init ConfigMap, generated
+# by kustomize from infra/docker-compose/init-timescale.sql (single source).
+apiVersion: v1
+kind: Service
+metadata:
+  name: timescaledb
+  namespace: iicpc
+  labels: { app: timescaledb }
+spec:
+  selector: { app: timescaledb }
+  ports:
+    - { name: postgres, port: 5432, targetPort: 5432 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: timescaledb
+  namespace: iicpc
+spec:
+  serviceName: timescaledb
+  replicas: 1
+  selector: { matchLabels: { app: timescaledb } }
+  template:
+    metadata:
+      labels: { app: timescaledb }
+    spec:
+      containers:
+        - name: timescaledb
+          image: timescale/timescaledb:2.16.1-pg16
+          env:
+            - { name: POSTGRES_USER,     valueFrom: { secretKeyRef: { name: db-credentials, key: POSTGRES_USER } } }
+            - { name: POSTGRES_PASSWORD, valueFrom: { secretKeyRef: { name: db-credentials, key: POSTGRES_PASSWORD } } }
+            - { name: POSTGRES_DB,       valueFrom: { secretKeyRef: { name: db-credentials, key: POSTGRES_DB } } }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports:
+            - { name: postgres, containerPort: 5432 }
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits: { cpu: "2", memory: "2Gi" }
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "bench", "-d", "bench"] }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: init, mountPath: /docker-entrypoint-initdb.d }
+      volumes:
+        - name: init
+          configMap: { name: timescale-init }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: 20Gi } }

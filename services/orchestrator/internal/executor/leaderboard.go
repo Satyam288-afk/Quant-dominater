@@ -18,17 +18,25 @@ type LeaderboardPublisher struct {
 }
 
 type leaderboardEntry struct {
-	RunID         string    `json:"run_id"`
-	TeamID        string    `json:"team_id"`
-	Score         float64   `json:"score"`
-	Valid         bool      `json:"valid"`
-	Status        string    `json:"status,omitempty"`
-	FailureReason string    `json:"failure_reason,omitempty"`
-	P50MS         float64   `json:"p50_ms,omitempty"`
-	P90MS         float64   `json:"p90_ms,omitempty"`
-	P99MS         float64   `json:"p99_ms,omitempty"`
-	TPS           float64   `json:"tps,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	RunID           string    `json:"run_id"`
+	TeamID          string    `json:"team_id"`
+	Score           float64   `json:"score"`
+	Valid           bool      `json:"valid"`
+	Status          string    `json:"status,omitempty"`
+	FailureReason   string    `json:"failure_reason,omitempty"`
+	P50MS           float64   `json:"p50_ms,omitempty"`
+	P90MS           float64   `json:"p90_ms,omitempty"`
+	P99MS           float64   `json:"p99_ms,omitempty"`
+	TPS             float64   `json:"tps,omitempty"`
+	PeakTPS         float64   `json:"peak_tps,omitempty"`
+	LatencyScore    float64   `json:"latency_score,omitempty"`
+	ThroughputScore float64   `json:"throughput_score,omitempty"`
+	StabilityScore  float64   `json:"stability_score,omitempty"`
+	ResourceScore   float64   `json:"resource_score,omitempty"`
+	OrdersSent      int64     `json:"orders_sent,omitempty"`
+	AcksReceived    int64     `json:"acks_received,omitempty"`
+	Timeouts        int64     `json:"timeouts,omitempty"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 func NewLeaderboardPublisher(baseURL string) *LeaderboardPublisher {
@@ -43,12 +51,16 @@ func (p *LeaderboardPublisher) Publish(ctx context.Context, run *model.Benchmark
 		return nil
 	}
 	entry := leaderboardEntry{
-		RunID:     run.RunID,
-		TeamID:    run.TeamID,
-		Score:     score.Score,
-		Valid:     score.Valid,
-		Status:    string(run.Status),
-		UpdatedAt: time.Now(),
+		RunID:           run.RunID,
+		TeamID:          run.TeamID,
+		Score:           score.Score,
+		Valid:           score.Valid,
+		Status:          string(run.Status),
+		LatencyScore:    score.LatencyScore,
+		ThroughputScore: score.ThroughputScore,
+		StabilityScore:  score.StabilityScore,
+		ResourceScore:   score.ResourceScore,
+		UpdatedAt:       time.Now(),
 	}
 	if validation != nil {
 		entry.FailureReason = validation.Reason
@@ -61,6 +73,13 @@ func (p *LeaderboardPublisher) Publish(ctx context.Context, run *model.Benchmark
 		entry.P90MS = metrics.P90MS
 		entry.P99MS = metrics.P99MS
 		entry.TPS = metrics.TPS
+		entry.PeakTPS = metrics.PeakTPS
+		if entry.PeakTPS == 0 {
+			entry.PeakTPS = metrics.TPS
+		}
+		entry.OrdersSent = int64(metrics.OrdersSent)
+		entry.AcksReceived = int64(metrics.AcksReceived)
+		entry.Timeouts = int64(metrics.Timeouts)
 	}
 
 	body, err := json.Marshal(entry)

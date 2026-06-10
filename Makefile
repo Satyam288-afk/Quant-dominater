@@ -1,4 +1,4 @@
-.PHONY: proto-go test-go test-rust bot-fleet validator stub-engine rust-engine validate-fixture control-panel submission-api sandbox-runner orchestrator score-engine leaderboard-api
+.PHONY: proto-go test-go test-rust bot-fleet validator stub-engine rust-engine validate-fixture control-panel submission-api sandbox-runner orchestrator score-engine leaderboard-api web web-build k8s-validate tf-validate iac-validate live-demo chaos-demo
 
 PROTOC_GEN_GO ?= $(shell go env GOPATH)/bin/protoc-gen-go
 
@@ -54,3 +54,29 @@ score-engine:
 
 leaderboard-api:
 	cd services/leaderboard-api && REPO_ROOT=$(CURDIR) go run .
+
+# Frontend
+web:
+	cd web && npm install && npm run dev
+
+web-build:
+	cd web && npm install && npm run build
+
+# Full live data-plane demo (needs Docker for redpanda/timescale/redis)
+live-demo:
+	./scripts/run-live-demo.sh
+
+# Failure-injection demo (no Docker): engine crash → fleet reconnect, SIGTERM → graceful drain
+chaos-demo:
+	./scripts/run-chaos-demo.sh
+
+# IaC validation (no cloud creds / cluster required)
+k8s-validate:
+	kubectl kustomize infra/k8s | kubeconform -strict -summary -kubernetes-version 1.30.0
+	kubeconform -strict -summary -kubernetes-version 1.30.0 infra/k8s/40-sandbox-pod-template.yaml infra/k8s/31-bot-fleet-job.yaml
+
+tf-validate:
+	cd infra/terraform && (command -v tofu >/dev/null && tofu fmt -check -recursive && tofu init -backend=false -input=false >/dev/null && tofu validate) || \
+		(terraform fmt -check -recursive && terraform init -backend=false -input=false >/dev/null && terraform validate)
+
+iac-validate: k8s-validate tf-validate

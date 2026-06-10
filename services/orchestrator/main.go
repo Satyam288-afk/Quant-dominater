@@ -6,8 +6,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"orchestrator/internal/api"
@@ -17,6 +19,11 @@ import (
 )
 
 func main() {
+	// Cancelled on SIGTERM/SIGINT. Stops the claim worker from picking up new
+	// runs and drives graceful drain of HTTP + in-flight runs.
+	serverCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
 	repoRoot, err := resolveRepoRoot()
 	if err != nil {
 		log.Fatal(err)
@@ -56,7 +63,8 @@ func main() {
 		runner.SetLeaderboardPublisher(executor.NewLeaderboardPublisher(leaderboardURL))
 	}
 	if autoStart {
-		runner.StartWorker(context.Background(), pollInterval)
+		// Worker stops claiming new runs when serverCtx is cancelled.
+		runner.StartWorker(serverCtx, pollInterval)
 	}
 
 	handler := api.NewHandler(runner, st)
@@ -68,8 +76,31 @@ func main() {
 		addr = ":9300"
 	}
 
-	log.Printf("orchestrator listening on %s repo_root=%s sandbox_runner_url=%s run_timeout=%s auto_start=%t poll_interval=%s", addr, repoRoot, sandboxRunnerURL, runTimeout, autoStart, pollInterval)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		log.Printf("orchestrator listening on %s repo_root=%s sandbox_runner_url=%s run_timeout=%s auto_start=%t poll_interval=%s", addr, repoRoot, sandboxRunnerURL, runTimeout, autoStart, pollInterval)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("listen: %v", err)
+		}
+	}()
+
+	<-serverCtx.Done()
+	stop() // restore default handling so a second signal force-quits
+	log.Printf("shutdown signal received; stopping worker, draining HTTP, cancelling in-flight runs")
+
+	shutCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutCtx); err != nil {
+		log.Printf("http shutdown: %v", err)
+	}
+	// Cancel and drain in-flight runs (their goroutines persist a terminal
+	// state) before the process exits — no orphaned runs or child processes.
+	runner.Shutdown(shutCtx)
+	log.Printf("orchestrator drained cleanly")
 }
 
 func envBool(name string, fallback bool) bool {

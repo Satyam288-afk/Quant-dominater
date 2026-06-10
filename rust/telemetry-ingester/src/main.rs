@@ -33,7 +33,11 @@ struct Args {
     input: PathBuf,
 
     /// Where to write the aggregated run summary as JSON.
-    #[arg(long, env = "TELEMETRY_SUMMARY_OUT", default_value = "telemetry-summary.json")]
+    #[arg(
+        long,
+        env = "TELEMETRY_SUMMARY_OUT",
+        default_value = "telemetry-summary.json"
+    )]
     summary_out: PathBuf,
 
     /// Restrict aggregation to a single run_id. Empty = all runs.
@@ -45,7 +49,11 @@ struct Args {
     kafka_brokers: String,
 
     /// Kafka topic (used only when --source kafka).
-    #[arg(long, env = "KAFKA_TELEMETRY_TOPIC", default_value = "telemetry.events.v1")]
+    #[arg(
+        long,
+        env = "KAFKA_TELEMETRY_TOPIC",
+        default_value = "telemetry.events.v1"
+    )]
     kafka_topic: String,
 
     /// Kafka consumer group id.
@@ -79,8 +87,19 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let (tx, rx) = mpsc::channel::<TelemetryEvent>(16_384);
 
+    // Shutdown plumbing. A SIGTERM/SIGINT (every k8s rolling deploy / eviction)
+    // flips this watch; the Kafka source observes it, synchronously commits its
+    // offset, and exits — so a restart resumes from the committed position
+    // instead of re-reading the auto-commit window, and the in-flight channel
+    // is drained rather than dropped.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        wait_for_shutdown().await;
+        let _ = shutdown_tx.send(true);
+    });
+
     // Spawn source. It pushes events into the channel and exits when done
-    // (file mode: EOF; kafka mode: signal-driven).
+    // (file mode: EOF; kafka mode: shutdown-signal driven, committing offsets).
     let source_handle = match args.source {
         SourceKind::File => {
             let path = args.input.clone();
@@ -91,7 +110,10 @@ async fn main() -> Result<()> {
             let brokers = args.kafka_brokers.clone();
             let topic = args.kafka_topic.clone();
             let group = args.kafka_group_id.clone();
-            tokio::spawn(async move { source::kafka::run(brokers, topic, group, tx).await })
+            let shutdown = shutdown_rx.clone();
+            tokio::spawn(
+                async move { source::kafka::run(brokers, topic, group, tx, shutdown).await },
+            )
         }
     };
 
@@ -107,8 +129,7 @@ async fn main() -> Result<()> {
     // own task with its own mpsc; we fan out each incoming event.
     #[cfg(feature = "timescale")]
     let timescale_tx = if !args.timescale_url.is_empty() {
-        match sink::timescale::spawn(args.timescale_url.clone(), args.flush_interval_ms, 1000)
-            .await
+        match sink::timescale::spawn(args.timescale_url.clone(), args.flush_interval_ms, 1000).await
         {
             Ok(tx) => Some(tx),
             Err(err) => {
@@ -140,9 +161,25 @@ async fn main() -> Result<()> {
 
     let mut rx = rx;
     let mut events_seen: u64 = 0;
+    // Bounded shutdown grace: on signal we keep draining buffered events (the
+    // Kafka source commits and closes its sender, so rx reaches `None` quickly),
+    // but cap the wait so a wedged source can't block shutdown forever.
+    let mut main_shutdown = shutdown_rx.clone();
+    let mut shutting_down = false;
+    let grace = tokio::time::sleep(Duration::from_secs(86_400));
+    tokio::pin!(grace);
     loop {
         tokio::select! {
             biased;
+            _ = main_shutdown.changed(), if !shutting_down => {
+                shutting_down = true;
+                tracing::info!("shutdown signal received; draining buffered events (grace 5s)");
+                grace.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(5));
+            }
+            _ = &mut grace, if shutting_down => {
+                tracing::warn!("shutdown grace elapsed; finalizing with what was drained");
+                break;
+            }
             evt = rx.recv() => {
                 match evt {
                     Some(e) => {
@@ -188,6 +225,31 @@ async fn main() -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Resolves when the process is asked to stop — SIGTERM or SIGINT on Unix
+/// (what k8s sends on a rolling deploy / eviction), Ctrl-C elsewhere.
+async fn wait_for_shutdown() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mut int = match signal(SignalKind::interrupt()) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 async fn write_summary(path: &PathBuf, summary: &RunSummary) -> Result<()> {

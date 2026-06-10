@@ -14,9 +14,23 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::{sync::mpsc, time::MissedTickBehavior};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream};
 
 mod pool;
+
+/// `zone!("name")` opens a Tracy profiling zone for the rest of the scope when
+/// built with `--features profiling`, and compiles to nothing otherwise — so
+/// the instrumentation has zero cost (and zero deps) in the shipping build.
+#[cfg(feature = "profiling")]
+macro_rules! zone {
+    ($name:expr) => {
+        let _zone = tracing::info_span!($name).entered();
+    };
+}
+#[cfg(not(feature = "profiling"))]
+macro_rules! zone {
+    ($name:expr) => {};
+}
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum Backend {
@@ -77,7 +91,11 @@ struct Args {
     kafka_brokers: String,
 
     /// Kafka topic for telemetry events.
-    #[arg(long, env = "KAFKA_TELEMETRY_TOPIC", default_value = "telemetry.events.v1")]
+    #[arg(
+        long,
+        env = "KAFKA_TELEMETRY_TOPIC",
+        default_value = "telemetry.events.v1"
+    )]
     kafka_topic: String,
 
     /// WebSocket connection pool size. 0 = one connection per bot (legacy,
@@ -86,11 +104,48 @@ struct Args {
     /// across N shared connections.
     #[arg(long, default_value_t = 0)]
     ws_connections: usize,
+
+    /// Mid price for the limit-order ladder (integer ticks).
+    #[arg(long, default_value_t = 10_025)]
+    price_base: i64,
+
+    /// Number of distinct price levels spread symmetrically around `price_base`.
+    /// 1 (default) reproduces the legacy single-price book; higher values give
+    /// the book real depth and a spread while orders still cross and fill.
+    #[arg(long, default_value_t = 1)]
+    price_levels: u64,
+
+    /// Maximum order size. Each order draws a deterministic size in 1..=qty_max.
+    #[arg(long, default_value_t = 5)]
+    qty_max: u64,
+
+    /// Share of orders sent as MARKET orders, in per-mille (‰). 0 = all limit
+    /// (legacy). 100 = 10% market orders. Market orders cross whatever rests and
+    /// any unfilled remainder is discarded (never rests).
+    #[arg(long, default_value_t = 0)]
+    market_per_mille: u64,
+
+    /// Share of actions sent as cancels of a prior order, in per-mille (‰).
+    /// 0 = never cancel (legacy). Cancels reference a real earlier order id so
+    /// they exercise the engine's cancel path and price-time book maintenance.
+    #[arg(long, default_value_t = 0)]
+    cancel_per_mille: u64,
+
+    /// This pod's index in a multi-pod Indexed Job. Order/bot IDs are offset by
+    /// `pod_index * bots` so they're globally unique across the whole fleet and
+    /// fills route to the right pod. Defaults from the Kubernetes Job env var;
+    /// 0 (single process) is byte-identical to the legacy behaviour.
+    #[arg(long, env = "JOB_COMPLETION_INDEX", default_value_t = 0)]
+    pod_index: usize,
 }
 
 #[derive(Clone, Debug)]
 struct BotConfig {
-    bot_index: usize,
+    /// Globally-unique bot index across all pods (`pod_index * bots + local`).
+    /// Drives every wire ID, timestamp, and symbol assignment so two pods never
+    /// collide. The local loop index (used for pool inbox indexing) stays in
+    /// `main` and is not threaded through here.
+    global_bot_index: usize,
     num_symbols: usize,
     target: String,
     run_id: String,
@@ -98,6 +153,11 @@ struct BotConfig {
     duration: Duration,
     seed: u64,
     ack_timeout: Duration,
+    price_base: i64,
+    price_levels: u64,
+    qty_max: u64,
+    market_per_mille: u64,
+    cancel_per_mille: u64,
 }
 
 #[derive(Debug, Default)]
@@ -108,6 +168,9 @@ struct BotStats {
     timeouts: u64,
     connect_errors: u64,
     latencies_ns: Vec<u64>,
+    /// Wall-clock receive time of every ack, used to compute peak (max) TPS in
+    /// any 1-second window — the brief's "max TPS before failure" headline.
+    ack_recv_ts_ns: Vec<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -121,10 +184,46 @@ struct NewOrder {
     price: i64,
     qty: i64,
     ts_ns: u64,
+    order_type: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct CancelOrder {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    run_id: String,
+    client_order_id: String,
+    orig_client_order_id: String,
+    ts_ns: u64,
+}
+
+/// A prepared outbound action — either a new order or a cancel — ready to send
+/// over either transport (direct WS or the pooled sender).
+struct Prepared {
+    /// JSON to put on the wire.
+    text: String,
+    /// Id to track for the ack (the request's own client_order_id).
+    track_id: String,
+    /// Event-log record for events.jsonl (the validator replays from this).
+    event: Value,
+    /// Send timestamp for telemetry.
+    send_ts_ns: u64,
+    /// True for a new order (it may rest and become cancellable).
+    is_new: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    #[cfg(feature = "profiling")]
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::registry().with(tracing_tracy::TracyLayer::default()),
+        )
+        .expect("set up tracy subscriber");
+        eprintln!("tracy profiling enabled — launch the Tracy server to capture zones");
+    }
+
     let mut args = Args::parse();
     if args.orders_per_sec == 0 {
         anyhow::bail!("--orders-per-sec must be greater than zero");
@@ -143,14 +242,29 @@ async fn main() -> Result<()> {
     let output_writer = tokio::spawn(jsonl_writer(args.outputs_out.clone(), output_rx));
 
     let mut handles = Vec::with_capacity(args.bots);
+    // Global ID base for this pod so order/bot IDs are unique fleet-wide.
+    let pod_offset = args.pod_index * args.bots;
+    if pod_offset > 0 {
+        eprintln!(
+            "pod {} owns global bots {}..{}",
+            args.pod_index,
+            pod_offset + 1,
+            pod_offset + args.bots
+        );
+    }
+    // Counts pooled-connection recoveries from mid-run engine outages. Read
+    // after the run for the summary even though the pool itself is dropped.
+    let mut reconnects_handle: Option<Arc<std::sync::atomic::AtomicU64>> = None;
     let pool_size = args.ws_connections;
     if pool_size > 0 {
         let n_conns = pool_size.min(args.bots);
         eprintln!("pooling {} bots over {} ws connections", args.bots, n_conns);
-        let mut pool = pool::ConnectionPool::connect(&args.target, n_conns, args.bots).await?;
+        let mut pool =
+            pool::ConnectionPool::connect(&args.target, n_conns, args.bots, pod_offset).await?;
+        reconnects_handle = Some(pool.reconnects_handle());
         for bot_index in 0..args.bots {
             let config = BotConfig {
-                bot_index,
+                global_bot_index: pod_offset + bot_index,
                 num_symbols: args.symbols,
                 target: args.target.clone(),
                 run_id: args.run_id.clone(),
@@ -158,6 +272,11 @@ async fn main() -> Result<()> {
                 duration: Duration::from_secs(args.duration_sec),
                 seed: args.seed,
                 ack_timeout: Duration::from_millis(args.ack_timeout_ms),
+                price_base: args.price_base,
+                price_levels: args.price_levels,
+                qty_max: args.qty_max,
+                market_per_mille: args.market_per_mille,
+                cancel_per_mille: args.cancel_per_mille,
             };
             let sender = pool.sender_for(bot_index);
             let inbox = pool.take_inbox(bot_index);
@@ -173,7 +292,7 @@ async fn main() -> Result<()> {
     } else {
         for bot_index in 0..args.bots {
             let config = BotConfig {
-                bot_index,
+                global_bot_index: pod_offset + bot_index,
                 num_symbols: args.symbols,
                 target: args.target.clone(),
                 run_id: args.run_id.clone(),
@@ -181,6 +300,11 @@ async fn main() -> Result<()> {
                 duration: Duration::from_secs(args.duration_sec),
                 seed: args.seed,
                 ack_timeout: Duration::from_millis(args.ack_timeout_ms),
+                price_base: args.price_base,
+                price_levels: args.price_levels,
+                qty_max: args.qty_max,
+                market_per_mille: args.market_per_mille,
+                cancel_per_mille: args.cancel_per_mille,
             };
             handles.push(tokio::spawn(run_bot(
                 config,
@@ -220,6 +344,7 @@ async fn main() -> Result<()> {
 
     totals.latencies_ns.sort_unstable();
     let tps = totals.acks_received as f64 / args.duration_sec.max(1) as f64;
+    let peak = peak_tps(&mut totals.ack_recv_ts_ns, args.duration_sec);
 
     println!("run_id: {}", args.run_id);
     println!("bots: {}", args.bots);
@@ -228,7 +353,12 @@ async fn main() -> Result<()> {
     println!("fills_received: {}", totals.fills_received);
     println!("timeouts: {}", totals.timeouts);
     println!("connect_errors: {}", totals.connect_errors);
+    let reconnects = reconnects_handle
+        .map(|h| h.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0);
+    println!("reconnects: {}", reconnects);
     println!("tps: {:.1}", tps);
+    println!("peak_tps: {}", peak);
     println!("p50: {}", fmt_ms(percentile(&totals.latencies_ns, 0.50)));
     println!("p90: {}", fmt_ms(percentile(&totals.latencies_ns, 0.90)));
     println!("p99: {}", fmt_ms(percentile(&totals.latencies_ns, 0.99)));
@@ -240,15 +370,15 @@ async fn main() -> Result<()> {
 
 async fn build_sink(args: &Args) -> Result<Arc<dyn TelemetrySink>> {
     match args.backend {
-        Backend::File => Ok(Arc::new(FileSink::create(args.telemetry_out.clone()).await?)),
+        Backend::File => Ok(Arc::new(
+            FileSink::create(args.telemetry_out.clone()).await?,
+        )),
         Backend::None => Ok(Arc::new(NullSink::new())),
         Backend::Live => {
             #[cfg(feature = "kafka")]
             {
-                let sink = bench_core::telemetry::KafkaSink::new(
-                    &args.kafka_brokers,
-                    &args.kafka_topic,
-                )?;
+                let sink =
+                    bench_core::telemetry::KafkaSink::new(&args.kafka_brokers, &args.kafka_topic)?;
                 eprintln!(
                     "live telemetry → kafka brokers={} topic={}",
                     args.kafka_brokers, args.kafka_topic
@@ -260,7 +390,9 @@ async fn build_sink(args: &Args) -> Result<Arc<dyn TelemetrySink>> {
                 eprintln!(
                     "binary built without `kafka` feature; degrading --backend live to file sink"
                 );
-                Ok(Arc::new(FileSink::create(args.telemetry_out.clone()).await?))
+                Ok(Arc::new(
+                    FileSink::create(args.telemetry_out.clone()).await?,
+                ))
             }
         }
     }
@@ -272,14 +404,21 @@ async fn run_bot(
     output_tx: mpsc::UnboundedSender<Value>,
     sink: Arc<dyn TelemetrySink>,
 ) -> Result<BotStats> {
-    let bot_id = format!("bot_{}", config.bot_index + 1);
+    let bot_id = format!("bot_{}", config.global_bot_index + 1);
     let (ws_stream, _) = connect_async(config.target.as_str())
         .await
         .with_context(|| format!("{bot_id} connect {}", config.target))?;
+    // TCP_NODELAY: don't let Nagle buffer small order frames (see pool.rs).
+    if let MaybeTlsStream::Plain(tcp) = ws_stream.get_ref() {
+        let _ = tcp.set_nodelay(true);
+    }
     let (mut write, mut read) = ws_stream.split();
 
     let mut stats = BotStats::default();
     let mut pending: HashMap<String, Instant> = HashMap::new();
+    // Recent resting order ids this bot can cancel (bounded; only tracked when
+    // cancels are enabled).
+    let mut sent_orders: Vec<String> = Vec::new();
     let mut seq_no = 0_u64;
     let started = Instant::now();
     let deadline = started + config.duration;
@@ -292,28 +431,25 @@ async fn run_bot(
         tokio::select! {
             _ = ticker.tick(), if Instant::now() < deadline => {
                 seq_no += 1;
-                let order = make_order(&config, seq_no);
-                let client_order_id = order.client_order_id.clone();
-                let text = serde_json::to_string(&order)?;
-                write.send(Message::Text(text)).await?;
-                pending.insert(client_order_id.clone(), Instant::now());
+                let prepared = build_send(&config, &bot_id, seq_no, &sent_orders);
+                write.send(Message::Text(prepared.text)).await?;
+                pending.insert(prepared.track_id.clone(), Instant::now());
                 stats.orders_sent += 1;
+                if config.cancel_per_mille > 0 && prepared.is_new {
+                    sent_orders.push(prepared.track_id.clone());
+                    if sent_orders.len() > 512 {
+                        sent_orders.remove(0);
+                    }
+                }
 
-                let _ = event_tx.send(json!({
-                    "event_type": "order_sent",
-                    "run_id": config.run_id,
-                    "bot_id": bot_id,
-                    "seq_no": seq_no,
-                    "send_ts_ns": order.ts_ns,
-                    "order": order,
-                }));
+                let _ = event_tx.send(prepared.event);
                 let _ = sink.emit(TelemetryEvent {
                     run_id: config.run_id.clone(),
                     bot_id: bot_id.clone(),
                     seq_no,
-                    client_order_id,
+                    client_order_id: prepared.track_id,
                     event_type: EventKind::OrderSent,
-                    send_ts_ns: order.ts_ns,
+                    send_ts_ns: prepared.send_ts_ns,
                     recv_ts_ns: 0,
                     latency_ns: 0,
                 }).await;
@@ -369,9 +505,12 @@ async fn run_bot_pooled(
     output_tx: mpsc::UnboundedSender<Value>,
     sink: Arc<dyn TelemetrySink>,
 ) -> Result<BotStats> {
-    let bot_id = format!("bot_{}", config.bot_index + 1);
+    let bot_id = format!("bot_{}", config.global_bot_index + 1);
     let mut stats = BotStats::default();
     let mut pending: HashMap<String, Instant> = HashMap::new();
+    // Recent resting order ids this bot can cancel (bounded; only tracked when
+    // cancels are enabled).
+    let mut sent_orders: Vec<String> = Vec::new();
     let mut seq_no = 0_u64;
     let started = Instant::now();
     let deadline = started + config.duration;
@@ -384,31 +523,28 @@ async fn run_bot_pooled(
         tokio::select! {
             _ = ticker.tick(), if Instant::now() < deadline => {
                 seq_no += 1;
-                let order = make_order(&config, seq_no);
-                let client_order_id = order.client_order_id.clone();
-                let text = serde_json::to_string(&order)?;
-                if sender.send(text).await.is_err() {
+                let prepared = build_send(&config, &bot_id, seq_no, &sent_orders);
+                if sender.send(prepared.text).await.is_err() {
                     // Pool writer closed — bail.
                     break;
                 }
-                pending.insert(client_order_id.clone(), Instant::now());
+                pending.insert(prepared.track_id.clone(), Instant::now());
                 stats.orders_sent += 1;
+                if config.cancel_per_mille > 0 && prepared.is_new {
+                    sent_orders.push(prepared.track_id.clone());
+                    if sent_orders.len() > 512 {
+                        sent_orders.remove(0);
+                    }
+                }
 
-                let _ = event_tx.send(json!({
-                    "event_type": "order_sent",
-                    "run_id": config.run_id,
-                    "bot_id": bot_id,
-                    "seq_no": seq_no,
-                    "send_ts_ns": order.ts_ns,
-                    "order": order,
-                }));
+                let _ = event_tx.send(prepared.event);
                 let _ = sink.emit(TelemetryEvent {
                     run_id: config.run_id.clone(),
                     bot_id: bot_id.clone(),
                     seq_no,
-                    client_order_id,
+                    client_order_id: prepared.track_id,
                     event_type: EventKind::OrderSent,
-                    send_ts_ns: order.ts_ns,
+                    send_ts_ns: prepared.send_ts_ns,
                     recv_ts_ns: 0,
                     latency_ns: 0,
                 }).await;
@@ -451,6 +587,8 @@ async fn handle_engine_value(
     output_tx: &mpsc::UnboundedSender<Value>,
     sink: &Arc<dyn TelemetrySink>,
 ) -> Result<()> {
+    // (async fn — instrument with #[tracing::instrument] rather than a scope
+    // guard, which can't be held across .await in a Send future.)
     let message_type = message.get("type").and_then(Value::as_str).unwrap_or("");
     let recv_ts_ns = now_ns();
 
@@ -466,6 +604,7 @@ async fn handle_engine_value(
                 .map(|sent| sent.elapsed().as_nanos() as u64)
                 .unwrap_or_default();
             stats.acks_received += 1;
+            stats.ack_recv_ts_ns.push(recv_ts_ns);
             if latency_ns > 0 {
                 stats.latencies_ns.push(latency_ns);
             }
@@ -478,16 +617,18 @@ async fn handle_engine_value(
                 "latency_ns": latency_ns,
                 "message": message,
             }));
-            let _ = sink.emit(TelemetryEvent {
-                run_id: run_id.to_string(),
-                bot_id: bot_id.to_string(),
-                seq_no: 0,
-                client_order_id,
-                event_type: EventKind::AckReceived,
-                send_ts_ns: 0,
-                recv_ts_ns,
-                latency_ns,
-            }).await;
+            let _ = sink
+                .emit(TelemetryEvent {
+                    run_id: run_id.to_string(),
+                    bot_id: bot_id.to_string(),
+                    seq_no: 0,
+                    client_order_id,
+                    event_type: EventKind::AckReceived,
+                    send_ts_ns: 0,
+                    recv_ts_ns,
+                    latency_ns,
+                })
+                .await;
         }
         "fill" => {
             stats.fills_received += 1;
@@ -504,16 +645,18 @@ async fn handle_engine_value(
                 "recv_ts_ns": recv_ts_ns,
                 "message": message,
             }));
-            let _ = sink.emit(TelemetryEvent {
-                run_id: run_id.to_string(),
-                bot_id: bot_id.to_string(),
-                seq_no: 0,
-                client_order_id,
-                event_type: EventKind::FillReceived,
-                send_ts_ns: 0,
-                recv_ts_ns,
-                latency_ns: 0,
-            }).await;
+            let _ = sink
+                .emit(TelemetryEvent {
+                    run_id: run_id.to_string(),
+                    bot_id: bot_id.to_string(),
+                    seq_no: 0,
+                    client_order_id,
+                    event_type: EventKind::FillReceived,
+                    send_ts_ns: 0,
+                    recv_ts_ns,
+                    latency_ns: 0,
+                })
+                .await;
         }
         _ => {
             let _ = output_tx.send(json!({
@@ -556,6 +699,7 @@ async fn handle_engine_message(
                 .map(|sent| sent.elapsed().as_nanos() as u64)
                 .unwrap_or_default();
             stats.acks_received += 1;
+            stats.ack_recv_ts_ns.push(recv_ts_ns);
             if latency_ns > 0 {
                 stats.latencies_ns.push(latency_ns);
             }
@@ -568,16 +712,18 @@ async fn handle_engine_message(
                 "latency_ns": latency_ns,
                 "message": message,
             }));
-            let _ = sink.emit(TelemetryEvent {
-                run_id: run_id.to_string(),
-                bot_id: bot_id.to_string(),
-                seq_no: 0,
-                client_order_id,
-                event_type: EventKind::AckReceived,
-                send_ts_ns: 0,
-                recv_ts_ns,
-                latency_ns,
-            }).await;
+            let _ = sink
+                .emit(TelemetryEvent {
+                    run_id: run_id.to_string(),
+                    bot_id: bot_id.to_string(),
+                    seq_no: 0,
+                    client_order_id,
+                    event_type: EventKind::AckReceived,
+                    send_ts_ns: 0,
+                    recv_ts_ns,
+                    latency_ns,
+                })
+                .await;
         }
         "fill" => {
             stats.fills_received += 1;
@@ -594,16 +740,18 @@ async fn handle_engine_message(
                 "recv_ts_ns": recv_ts_ns,
                 "message": message,
             }));
-            let _ = sink.emit(TelemetryEvent {
-                run_id: run_id.to_string(),
-                bot_id: bot_id.to_string(),
-                seq_no: 0,
-                client_order_id,
-                event_type: EventKind::FillReceived,
-                send_ts_ns: 0,
-                recv_ts_ns,
-                latency_ns: 0,
-            }).await;
+            let _ = sink
+                .emit(TelemetryEvent {
+                    run_id: run_id.to_string(),
+                    bot_id: bot_id.to_string(),
+                    seq_no: 0,
+                    client_order_id,
+                    event_type: EventKind::FillReceived,
+                    send_ts_ns: 0,
+                    recv_ts_ns,
+                    latency_ns: 0,
+                })
+                .await;
         }
         _ => {
             let _ = output_tx.send(json!({
@@ -630,25 +778,130 @@ async fn jsonl_writer(path: PathBuf, mut rx: mpsc::UnboundedReceiver<Value>) -> 
     Ok(())
 }
 
+/// Deterministic 64-bit mixer (SplitMix64). Pure function of its input, so a
+/// run with a fixed `--seed` is fully reproducible while every order still
+/// varies in price, size, and type.
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = x;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 fn make_order(config: &BotConfig, seq_no: u64) -> NewOrder {
-    let side = if (config.bot_index as u64 + seq_no) % 2 == 0 {
+    zone!("make_order");
+    // Global index drives every externally-visible facet (ID, timestamp,
+    // symbol) so two pods never collide; only pool inbox indexing uses local.
+    let gbi = config.global_bot_index;
+    let side = if (gbi as u64 + seq_no).is_multiple_of(2) {
         "BUY"
     } else {
         "SELL"
     };
     let base_ts = 1_770_000_000_000_000_000_u64 + config.seed.saturating_mul(1_000_000);
-    let ts_ns = base_ts + seq_no.saturating_mul(1_000_000) + config.bot_index as u64;
-    let sym_idx = bench_core::shard::bot_to_symbol(config.bot_index, config.num_symbols);
+    let ts_ns = base_ts + seq_no.saturating_mul(1_000_000) + gbi as u64;
+    let sym_idx = bench_core::shard::bot_to_symbol(gbi, config.num_symbols);
+
+    // Per-order entropy keyed by (seed, bot, seq): reproducible yet varied.
+    let h = splitmix64(
+        config
+            .seed
+            .wrapping_add((gbi as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+            .wrapping_add(seq_no.wrapping_mul(0xD1B5_4A32_D192_ED03)),
+    );
+
+    // A fraction of orders are MARKET — they sweep whatever rests and discard
+    // any unfilled remainder, simulating aggressive takers.
+    let is_market = h % 1000 < config.market_per_mille;
+
+    // Limit price ladder: spread price_levels ticks symmetrically around the
+    // mid, so the book gains real depth and a spread while orders still cross.
+    // price_levels == 1 (default) reproduces the legacy single-price book.
+    let levels = config.price_levels.max(1) as i64;
+    let tick = ((h >> 12) % levels as u64) as i64 - levels / 2;
+    let price = if is_market {
+        0
+    } else {
+        config.price_base + tick
+    };
+
+    // Order size in 1..=qty_max, deterministic.
+    let qty = 1 + ((h >> 24) % config.qty_max.max(1)) as i64;
 
     NewOrder {
         message_type: "new_order",
         run_id: config.run_id.clone(),
-        client_order_id: format!("bot_{}_{seq_no:06}", config.bot_index + 1),
+        client_order_id: format!("bot_{}_{seq_no:06}", gbi + 1),
         symbol: format!("SYM_{}", sym_idx + 1),
         side,
-        price: 10_025,
-        qty: 1 + ((config.bot_index as i64 + seq_no as i64) % 5),
+        price,
+        qty,
         ts_ns,
+        order_type: if is_market { "MARKET" } else { "LIMIT" },
+    }
+}
+
+/// Decide the next action for a bot and prepare it for sending. With
+/// probability `cancel_per_mille` (and only once the bot has resting orders to
+/// cancel) it emits a cancel of a previously-sent order; otherwise a new order.
+fn build_send(config: &BotConfig, bot_id: &str, seq_no: u64, sent: &[String]) -> Prepared {
+    zone!("build_send");
+    let h = splitmix64(
+        config
+            .seed
+            .wrapping_add(0xCA11_CA11_CA11_CA11)
+            .wrapping_add((config.global_bot_index as u64).wrapping_mul(0x100_0000_01B3))
+            .wrapping_add(seq_no.wrapping_mul(0x0100_0193)),
+    );
+    let do_cancel = !sent.is_empty() && h % 1000 < config.cancel_per_mille;
+
+    if do_cancel {
+        let orig = sent[(h >> 20) as usize % sent.len()].clone();
+        let base_ts = 1_770_000_000_000_000_000_u64 + config.seed.saturating_mul(1_000_000);
+        let ts_ns = base_ts + seq_no.saturating_mul(1_000_000) + config.global_bot_index as u64;
+        let coid = format!("bot_{}_c{seq_no:06}", config.global_bot_index + 1);
+        let cancel = CancelOrder {
+            message_type: "cancel_order",
+            run_id: config.run_id.clone(),
+            client_order_id: coid.clone(),
+            orig_client_order_id: orig,
+            ts_ns,
+        };
+        let event = json!({
+            "event_type": "cancel_sent",
+            "run_id": config.run_id,
+            "bot_id": bot_id,
+            "seq_no": seq_no,
+            "send_ts_ns": ts_ns,
+            "order": cancel,
+        });
+        Prepared {
+            text: serde_json::to_string(&cancel).unwrap_or_default(),
+            track_id: coid,
+            event,
+            send_ts_ns: ts_ns,
+            is_new: false,
+        }
+    } else {
+        let order = make_order(config, seq_no);
+        let coid = order.client_order_id.clone();
+        let send_ts_ns = order.ts_ns;
+        let event = json!({
+            "event_type": "order_sent",
+            "run_id": config.run_id,
+            "bot_id": bot_id,
+            "seq_no": seq_no,
+            "send_ts_ns": send_ts_ns,
+            "order": order,
+        });
+        Prepared {
+            text: serde_json::to_string(&order).unwrap_or_default(),
+            track_id: coid,
+            event,
+            send_ts_ns,
+            is_new: true,
+        }
     }
 }
 
@@ -659,6 +912,22 @@ fn merge_stats(total: &mut BotStats, next: BotStats) {
     total.timeouts += next.timeouts;
     total.connect_errors += next.connect_errors;
     total.latencies_ns.extend(next.latencies_ns);
+    total.ack_recv_ts_ns.extend(next.ack_recv_ts_ns);
+}
+
+/// Peak TPS = the largest number of acks landing in any aligned 1-second
+/// window. This is "max sustained throughput", distinct from the average
+/// (acks / duration), and is the headline the brief asks for.
+fn peak_tps(ack_recv_ts_ns: &mut [u64], window_secs: u64) -> u64 {
+    if ack_recv_ts_ns.is_empty() {
+        return 0;
+    }
+    ack_recv_ts_ns.sort_unstable();
+    let counter = bench_core::metrics::TpsCounter::new(window_secs as usize + 2);
+    for ts in ack_recv_ts_ns.iter() {
+        counter.record(*ts);
+    }
+    counter.peak_tps()
 }
 
 fn percentile(sorted: &[u64], p: f64) -> Option<f64> {

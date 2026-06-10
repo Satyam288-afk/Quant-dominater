@@ -1,0 +1,22 @@
+# Two namespaces enforce the trust boundary between our platform and the
+# untrusted contestant code:
+#   iicpc          - control plane, data plane, load generator (trusted)
+#   iicpc-sandbox  - contestant engines only (untrusted, network-fenced)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: iicpc
+  labels:
+    app.kubernetes.io/part-of: iicpc-benchmark
+    pod-security.kubernetes.io/enforce: baseline
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: iicpc-sandbox
+  labels:
+    app.kubernetes.io/part-of: iicpc-benchmark
+    zone: untrusted
+    # Contestant pods run under the restricted Pod Security Standard.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

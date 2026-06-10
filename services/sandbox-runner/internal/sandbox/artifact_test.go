@@ -44,6 +44,37 @@ func TestPrepareBuildContextSingleGoFile(t *testing.T) {
 	}
 }
 
+func TestDefaultDockerfilePerLanguage(t *testing.T) {
+	cases := map[string]string{
+		"go":     "golang:1.22-alpine",
+		"rust":   "rust:1-slim",
+		"cpp":    "gcc:13",
+		"c++":    "gcc:13",
+		"binary": "COPY engine /engine",
+	}
+	for language, marker := range cases {
+		dir := t.TempDir()
+		if err := writeDefaultDockerfile(dir, language); err != nil {
+			t.Fatalf("language %q: %v", language, err)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, "Dockerfile"))
+		if err != nil {
+			t.Fatalf("language %q: %v", language, err)
+		}
+		content := string(data)
+		if !strings.Contains(content, marker) {
+			t.Fatalf("language %q Dockerfile missing %q:\n%s", language, marker, content)
+		}
+		if !strings.Contains(content, "EXPOSE 8080") {
+			t.Fatalf("language %q Dockerfile missing EXPOSE 8080", language)
+		}
+	}
+
+	if err := writeDefaultDockerfile(t.TempDir(), "haskell"); err == nil {
+		t.Fatal("expected unsupported language to error")
+	}
+}
+
 func TestUnzipRejectsTraversal(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "bad.zip")
 	file, err := os.Create(src)

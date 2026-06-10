@@ -23,6 +23,22 @@ func NewBotFleet(repoRoot string) *BotFleet {
 func (b *BotFleet) Run(ctx context.Context, run *model.BenchmarkRun, endpoint string) (*model.Metrics, error) {
 	eventsOut := filepath.Join(run.ArtifactDir, "events.jsonl")
 	outputsOut := filepath.Join(run.ArtifactDir, "contestant_outputs.jsonl")
+
+	// Realistic order flow: pool many bots over a few connections, share
+	// symbols so bots actually trade with each other, and add book depth +
+	// market orders. Values scale with the bot count and stay correctness-clean
+	// (the validator replays in the engine's accepted order).
+	wsConns := run.Config.BotCount
+	if wsConns > 8 {
+		wsConns = 8
+	}
+	if wsConns < 1 {
+		wsConns = 1
+	}
+	symbols := run.Config.BotCount / 4
+	if symbols < 1 {
+		symbols = 1
+	}
 	output := runLoggedCommand(
 		ctx,
 		run,
@@ -35,6 +51,12 @@ func (b *BotFleet) Run(ctx context.Context, run *model.BenchmarkRun, endpoint st
 		"--duration-sec", strconv.Itoa(run.Config.DurationSec),
 		"--seed", strconv.FormatInt(run.BenchmarkSeed, 10),
 		"--run-id", run.RunID,
+		"--ws-connections", strconv.Itoa(wsConns),
+		"--symbols", strconv.Itoa(symbols),
+		"--price-levels", "5",
+		"--qty-max", "10",
+		"--market-per-mille", "100",
+		"--cancel-per-mille", "100",
 		"--events-out", eventsOut,
 		"--outputs-out", outputsOut,
 	)
@@ -84,6 +106,8 @@ func parseMetrics(text string) *model.Metrics {
 			metrics.ConnectErrors = atoi(value)
 		case "tps":
 			metrics.TPS = atof(value)
+		case "peak_tps":
+			metrics.PeakTPS = atof(value)
 		case "p50":
 			metrics.P50MS = parseMS(value)
 		case "p90":

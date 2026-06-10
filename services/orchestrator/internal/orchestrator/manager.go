@@ -169,6 +169,44 @@ func (m *Manager) CancelRun(ctx context.Context, runID string) (*model.Benchmark
 	return run, nil
 }
 
+// Shutdown cancels every in-flight run so its goroutine unwinds and persists a
+// terminal (cancelled) state instead of being orphaned past process exit, then
+// waits — bounded by ctx — for those goroutines to drain. Run contexts are
+// rooted at context.Background() (so a transient worker hiccup can't kill a
+// healthy run), which is exactly why they need an explicit cancel on SIGTERM:
+// without this, a `kill` mid-run leaves a goroutine (and its child engine
+// process) running detached and the run wedged mid-"building" on disk.
+func (m *Manager) Shutdown(ctx context.Context) {
+	m.mu.Lock()
+	inflight := len(m.cancels)
+	for _, cancel := range m.cancels {
+		cancel()
+	}
+	m.mu.Unlock()
+	if inflight == 0 {
+		return
+	}
+	slog.Info("orchestrator shutdown: cancelling in-flight runs", "count", inflight)
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		m.mu.Lock()
+		remaining := len(m.cancels)
+		m.mu.Unlock()
+		if remaining == 0 {
+			slog.Info("orchestrator shutdown: all runs drained")
+			return
+		}
+		select {
+		case <-ctx.Done():
+			slog.Warn("orchestrator shutdown grace elapsed with runs still draining", "remaining", remaining)
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 func (m *Manager) BenchmarkEndpoint(ctx context.Context, req model.DirectBenchmarkRequest) (*model.DirectBenchmarkResult, error) {
 	endpoint := strings.TrimSpace(req.EndpointURL)
 	if endpoint == "" {
@@ -215,6 +253,7 @@ func (m *Manager) BenchmarkEndpoint(ctx context.Context, req model.DirectBenchma
 	if err != nil {
 		return m.finishDirectFailure(runCtx, run, "BENCHMARKING", err, metrics, nil, nil), nil
 	}
+	mergeResourceSample(run.ArtifactDir, metrics)
 
 	store.Touch(run, model.RunStatusValidating)
 	_ = m.writeRunSpec(run)
@@ -319,6 +358,7 @@ func (m *Manager) execute(ctx context.Context, run *model.BenchmarkRun) {
 		m.fail(ctx, run, "BENCHMARKING", err)
 		return
 	}
+	mergeResourceSample(run.ArtifactDir, metrics)
 
 	if err := m.transition(ctx, run, model.RunStatusValidating); err != nil {
 		m.fail(ctx, run, "VALIDATING", err)
@@ -440,6 +480,29 @@ func (m *Manager) fail(ctx context.Context, run *model.BenchmarkRun, stage strin
 	_ = m.store.SaveRun(context.Background(), run)
 	_ = appendRunLog(run, fmt.Sprintf("run stopped at %s: %s", stage, run.FailureReason))
 	slog.Error("orchestrator run stopped", "run_id", run.RunID, "status", run.Status, "stage", stage, "err", err)
+}
+
+// mergeResourceSample folds the sandbox's resource.json (peak CPU%/memory of
+// the contestant engine, written into the artifact dir by the sandbox sampler)
+// into the metrics so the scorer's 10% resource term is real. Absent or
+// unparseable -> left at zero, which the scorer treats as neutral (100), so a
+// missing sample never penalises an engine.
+func mergeResourceSample(artifactDir string, metrics *model.Metrics) {
+	if metrics == nil || artifactDir == "" {
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(artifactDir, "resource.json"))
+	if err != nil {
+		return
+	}
+	var sample struct {
+		CPUPctPeak float64 `json:"cpu_pct_peak"`
+		MemMBPeak  float64 `json:"mem_mb_peak"`
+	}
+	if json.Unmarshal(data, &sample) == nil {
+		metrics.CPUPctPeak = sample.CPUPctPeak
+		metrics.MemMBPeak = sample.MemMBPeak
+	}
 }
 
 func (m *Manager) writeRunSpec(run *model.BenchmarkRun) error {

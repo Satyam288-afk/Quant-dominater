@@ -58,12 +58,32 @@ pub async fn pull_metrics(timescale_url: &str, run_id: &str) -> Result<Extracted
     let duration = duration_secs.unwrap_or(0.0).max(0.001);
     let tps = acks_received as f64 / duration;
 
+    // Peak TPS = the busiest 1-second ack window — "max TPS before failure".
+    // Best-effort: a failure here falls back to the average so scoring never
+    // breaks on this secondary metric.
+    let peak_tps: f64 = sqlx::query_scalar::<_, f64>(
+        r#"
+        SELECT COALESCE(MAX(c), 0)::DOUBLE PRECISION
+        FROM (
+            SELECT COUNT(*) AS c
+            FROM metrics_raw
+            WHERE run_id = $1 AND event_type = 'ack_received'
+            GROUP BY time_bucket('1 second', time)
+        ) s
+        "#,
+    )
+    .bind(run_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(tps);
+
     Ok(ExtractedMetrics {
         p50_ms: p50_ms.unwrap_or(0.0),
         p90_ms: p90_ms.unwrap_or(0.0),
         p99_ms: p99_ms.unwrap_or(0.0),
         p999_ms: p999_ms.unwrap_or(0.0),
         tps,
+        peak_tps,
         orders_sent,
         acks_received,
         timeouts,
@@ -120,6 +140,68 @@ pub async fn upsert_score(timescale_url: &str, team_id: &str, score: &ScoreJson)
     Ok(())
 }
 
+/// Compute the per-second latency/throughput series for a run straight from the
+/// authoritative `metrics_raw` rows in Timescale and cache it in Redis as a JSON
+/// array under `run:{id}:latency_series`, so the leaderboard UI can chart how
+/// p50/p99 latency and TPS moved (and degraded) over the run. Timescale is the
+/// source of truth here — reliable and exact — rather than sampling live.
+pub async fn publish_latency_series(
+    timescale_url: &str,
+    redis_url: &str,
+    run_id: &str,
+) -> Result<()> {
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(timescale_url)
+        .await
+        .context("connecting timescale for latency series")?;
+    let rows = sqlx::query(
+        r#"
+        SELECT
+          (EXTRACT(EPOCH FROM time_bucket('1 second', time)))::BIGINT AS sec,
+          COUNT(*)                                                     AS acks,
+          (percentile_cont(0.50) WITHIN GROUP (ORDER BY latency_ns))::DOUBLE PRECISION / 1e6 AS p50_ms,
+          (percentile_cont(0.99) WITHIN GROUP (ORDER BY latency_ns))::DOUBLE PRECISION / 1e6 AS p99_ms
+        FROM metrics_raw
+        WHERE run_id = $1 AND event_type = 'ack_received' AND latency_ns > 0
+        GROUP BY sec
+        ORDER BY sec
+        "#,
+    )
+    .bind(run_id)
+    .fetch_all(&pool)
+    .await
+    .context("querying latency series")?;
+
+    let mut base: Option<i64> = None;
+    let mut points: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let sec: i64 = row.try_get("sec")?;
+        let acks: i64 = row.try_get("acks")?;
+        let p50: f64 = row.try_get("p50_ms").unwrap_or(0.0);
+        let p99: f64 = row.try_get("p99_ms").unwrap_or(0.0);
+        let b = *base.get_or_insert(sec);
+        points.push(serde_json::json!({
+            "t": sec - b,
+            "tps": acks,
+            "p50_ms": (p50 * 100.0).round() / 100.0,
+            "p99_ms": (p99 * 100.0).round() / 100.0,
+        }));
+    }
+    let json = serde_json::to_string(&points)?;
+
+    let client = redis::Client::open(redis_url.to_string()).context("opening redis url")?;
+    let mut mgr = ConnectionManager::new(client).await?;
+    let _: () = redis::cmd("SET")
+        .arg(format!("run:{}:latency_series", run_id))
+        .arg(json)
+        .arg("EX")
+        .arg(86_400)
+        .query_async(&mut mgr)
+        .await?;
+    Ok(())
+}
+
 pub async fn publish_leaderboard(redis_url: &str, team_id: &str, score: &ScoreJson) -> Result<()> {
     let client = redis::Client::open(redis_url.to_string()).context("opening redis url")?;
     let mut mgr = ConnectionManager::new(client).await?;
@@ -145,5 +227,53 @@ pub async fn publish_leaderboard(redis_url: &str, team_id: &str, score: &ScoreJs
             score.run_id.clone(),
         )
         .await?;
+
+    // Full scorecard so the leaderboard-api can render rich rows (latency
+    // percentiles + score breakdown) by reading Redis only — no Postgres on
+    // the hot path. Keyed by team so the latest run wins.
+    let scorecard_key = format!("team:{}:scorecard", team_id);
+    let mut pipe = redis::pipe();
+    pipe.cmd("HSET")
+        .arg(&scorecard_key)
+        .arg("run_id")
+        .arg(&score.run_id)
+        .arg("team_id")
+        .arg(team_id)
+        .arg("valid")
+        .arg(if score.valid { 1 } else { 0 })
+        .arg("score")
+        .arg(score.score)
+        .arg("latency_score")
+        .arg(score.latency_score)
+        .arg("throughput_score")
+        .arg(score.throughput_score)
+        .arg("stability_score")
+        .arg(score.stability_score)
+        .arg("resource_score")
+        .arg(score.resource_score)
+        .arg("p50_ms")
+        .arg(score.p50_ms)
+        .arg("p90_ms")
+        .arg(score.p90_ms)
+        .arg("p99_ms")
+        .arg(score.p99_ms)
+        .arg("p999_ms")
+        .arg(score.p999_ms)
+        .arg("tps")
+        .arg(score.tps)
+        .arg("peak_tps")
+        .arg(score.peak_tps)
+        .arg("orders_sent")
+        .arg(score.orders_sent)
+        .arg("acks_received")
+        .arg(score.acks_received)
+        .arg("timeouts")
+        .arg(score.timeouts)
+        .arg("failure_reason")
+        .arg(score.failure_reason.clone().unwrap_or_default())
+        .ignore();
+    pipe.cmd("SADD").arg("leaderboard:teams").arg(team_id).ignore();
+    let _: redis::RedisResult<()> = pipe.query_async(&mut mgr).await;
+
     Ok(())
 }

@@ -54,11 +54,9 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("connect {}", args.target))?;
 
-    let orders = vec![
-        order(&args.run_id, "buy_late", "BUY", 1_770_000_000_000_000_002),
+    let orders = [order(&args.run_id, "buy_late", "BUY", 1_770_000_000_000_000_002),
         order(&args.run_id, "buy_early", "BUY", 1_770_000_000_000_000_001),
-        order(&args.run_id, "sell_1", "SELL", 1_770_000_000_000_000_003),
-    ];
+        order(&args.run_id, "sell_1", "SELL", 1_770_000_000_000_000_003)];
 
     let mut pending: HashMap<&str, u64> = HashMap::new();
     let mut ack_count = 0_u64;

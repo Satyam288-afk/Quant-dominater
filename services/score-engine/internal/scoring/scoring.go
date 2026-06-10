@@ -43,7 +43,7 @@ func Score(req Request) ScoreResult {
 	result.LatencyScore = latencyScore(metrics.P99MS)
 	result.ThroughputScore = throughputScore(metrics.TPS, req.Config.BotCount*req.Config.RatePerBot)
 	result.StabilityScore = stabilityScore(metrics.OrdersSent, metrics.Timeouts, metrics.ConnectErrors)
-	result.ResourceScore = 100
+	result.ResourceScore = resourceScore(metrics.CPUPctPeak, metrics.MemMBPeak)
 	result.Score = round2(
 		0.40*result.LatencyScore +
 			0.30*result.ThroughputScore +
@@ -87,6 +87,34 @@ func stabilityScore(ordersSent, timeouts, connectErrors int) float64 {
 	score := 100 * (1 - float64(timeouts+connectErrors)/float64(ordersSent))
 	if score < 0 {
 		score = 0
+	}
+	return round2(score)
+}
+
+// resourceScore rewards engines that pass the correctness gate while using less
+// CPU and memory. It is the exact twin of the Rust scorer's
+// resource_efficiency_score (rust/bench-core/src/score/formula.rs) so the Go and
+// Rust paths agree. cpuPct <= 0 means "not sampled" -> neutral 100 (the sandbox
+// reports 0 when it couldn't measure). A soft linear penalty starts at 50% CPU
+// and 512 MB: cpu is capped at 100% before penalising, so a busy single core
+// caps the CPU penalty at (100-50)*1.5 = 75.
+func resourceScore(cpuPct, memMB float64) float64 {
+	if cpuPct <= 0 {
+		return 100
+	}
+	cpu := math.Min(cpuPct, 100)
+	mem := memMB
+	if mem < 0 {
+		mem = 0
+	}
+	cpuPenalty := math.Max(cpu-50, 0) * 1.5
+	memPenalty := math.Max(mem-512, 0) * 0.05
+	score := 100 - cpuPenalty - memPenalty
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
 	}
 	return round2(score)
 }

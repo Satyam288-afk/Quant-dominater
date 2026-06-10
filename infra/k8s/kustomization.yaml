@@ -1,0 +1,44 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# `kubectl apply -k infra/k8s` brings up a full benchmark cell. Per-run
+# templates (40-sandbox-pod-template, 31-bot-fleet-job) are intentionally NOT
+# listed here — the orchestrator instantiates those per benchmark run.
+resources:
+  - 00-namespaces.yaml
+  - 01-config.yaml
+  - 02-rbac.yaml
+  - 10-redpanda.yaml
+  - 11-timescaledb.yaml
+  - 12-redis.yaml
+  - 20-submission-api.yaml
+  - 21-sandbox-runner.yaml
+  - 22-orchestrator.yaml
+  - 23-leaderboard-api.yaml
+  - 30-telemetry-ingester.yaml
+  - 41-network-policies.yaml
+
+# TimescaleDB schema from the single source of truth shared with docker-compose.
+configMapGenerator:
+  - name: timescale-init
+    namespace: iicpc
+    files:
+      - files/init-timescale.sql
+generatorOptions:
+  disableNameSuffixHash: true
+
+# Central place to retag images once Terraform provisions the registry, e.g.:
+#   kustomize edit set image ghcr.io/iicpc/leaderboard-api=<acct>.dkr.ecr.<region>.amazonaws.com/leaderboard-api:v1
+images:
+  - name: ghcr.io/iicpc/submission-api
+    newTag: latest
+  - name: ghcr.io/iicpc/sandbox-runner
+    newTag: latest
+  - name: ghcr.io/iicpc/orchestrator
+    newTag: latest
+  - name: ghcr.io/iicpc/leaderboard-api
+    newTag: latest
+  - name: ghcr.io/iicpc/telemetry-ingester
+    newTag: latest
+  - name: ghcr.io/iicpc/bot-fleet
+    newTag: latest

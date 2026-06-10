@@ -13,6 +13,8 @@ obj/
 *.test
 *.out
 vendor/
+# built engine binary (go build output, not source)
+examples/stub-engine/stub-engine
 
 # Environment / Runs
 .runs/
@@ -28,6 +30,26 @@ vendor/
 /contestant_outputs.jsonl
 /validation.json
 /score.json
+
+# Terraform / OpenTofu (commit .terraform.lock.hcl, ignore the rest)
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+!*.tfvars.example
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Web / Node
+node_modules/
+web/dist/
+*.tsbuildinfo
 
 # MacOS
 .DS_Store

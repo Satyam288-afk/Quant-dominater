@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +24,7 @@ import (
 	dockerclient "github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/go-connections/nat"
+	units "github.com/docker/go-units"
 )
 
 const dockerContainerPort = "8080"
@@ -38,6 +41,8 @@ type DockerRunner struct {
 type dockerSandbox struct {
 	handle      SandboxHandle
 	containerID string
+	sampler     *resourceSampler
+	statsCli    *dockerclient.Client
 }
 
 func NewDockerRunner(repoRoot string, runRoot string) *DockerRunner {
@@ -176,6 +181,68 @@ func (r *DockerRunner) Start(req StartRequest) (SandboxHandle, error) {
 	}
 
 	pidsLimit := int64(512)
+	memBytes := parseDockerMemoryBytes(req.Spec.MemoryLimit)
+	nanoCPUs := parseDockerNanoCPUs(req.Spec.CPULimit)
+
+	// CPU pinning: explicit cpuset from the spec or SANDBOX_CPUSET. Pinning a
+	// contestant to a fixed core set removes scheduler cross-talk so latency
+	// percentiles are fair and reproducible between runs.
+	cpuset := strings.TrimSpace(req.Spec.CpusetCpus)
+	if cpuset == "" {
+		cpuset = strings.TrimSpace(os.Getenv("SANDBOX_CPUSET"))
+	}
+	// Honesty guard: Docker Desktop (macOS/Windows) runs containers inside a
+	// LinuxKit VM that does not expose host cgroup cpuset controls, so a
+	// CpusetCpus pin silently no-ops there. Rather than claim fairness we can't
+	// deliver, log it and lean on the NanoCPUs quota (set below), which the VM
+	// does honor, as the effective fairness control. On a real Linux host the
+	// cpuset pin applies as intended.
+	if cpuset != "" && runtime.GOOS != "linux" {
+		log.Printf(
+			"sandbox: CPU pinning (cpuset=%q) is unsupported on %s Docker; "+
+				"falling back to the NanoCPUs quota for fair scheduling",
+			cpuset, runtime.GOOS,
+		)
+		cpuset = ""
+	}
+
+	// Disable swap (MemorySwap == Memory, swappiness 0) so a contestant cannot
+	// mask memory pressure by paging — cgroup memory.max is the hard wall.
+	memSwap := int64(0)
+	swappiness := int64(0)
+	if memBytes > 0 {
+		memSwap = memBytes
+	}
+
+	// Bound open files so a submission cannot exhaust host descriptors.
+	const nofile = int64(4096)
+	ulimits := []*units.Ulimit{{Name: "nofile", Soft: nofile, Hard: nofile}}
+
+	// Read-only rootfs means the engine can write only to the mounted
+	// artifacts dir and a small, locked-down tmpfs.
+	tmpfs := map[string]string{"/tmp": "rw,noexec,nosuid,nodev,size=64m"}
+
+	// Network: bridge with a loopback-bound published port for the bot fleet.
+	// Internet / cross-contestant egress is denied in production by the per-cell
+	// Kubernetes NetworkPolicy (infra/k8s). For Docker an operator can pin an
+	// internal network via SANDBOX_DOCKER_NETWORK; with egress disabled (the
+	// default) DNS is also black-holed as defense-in-depth.
+	networkMode := container.NetworkMode("bridge")
+	if n := strings.TrimSpace(os.Getenv("SANDBOX_DOCKER_NETWORK")); n != "" {
+		networkMode = container.NetworkMode(n)
+	}
+	var dns []string
+	if !req.Spec.NetworkEgress {
+		dns = []string{"127.0.0.1"}
+	}
+
+	// no-new-privileges always; an explicit seccomp profile can be supplied via
+	// SANDBOX_SECCOMP_PROFILE (otherwise Docker's default seccomp applies).
+	securityOpt := []string{"no-new-privileges:true"}
+	if profile := strings.TrimSpace(os.Getenv("SANDBOX_SECCOMP_PROFILE")); profile != "" {
+		securityOpt = append(securityOpt, "seccomp="+profile)
+	}
+
 	createResp, err := cli.ContainerCreate(
 		ctx,
 		&container.Config{
@@ -191,13 +258,19 @@ func (r *DockerRunner) Start(req StartRequest) (SandboxHandle, error) {
 				filepath.Dir(eventsPath) + ":/artifacts",
 			},
 			CapDrop:        []string{"ALL"},
-			NetworkMode:    "bridge",
+			NetworkMode:    networkMode,
 			ReadonlyRootfs: true,
 			Runtime:        strings.TrimSpace(os.Getenv("SANDBOX_DOCKER_RUNTIME")),
+			DNS:            dns,
+			Tmpfs:          tmpfs,
 			Resources: container.Resources{
-				Memory:    parseDockerMemoryBytes(req.Spec.MemoryLimit),
-				NanoCPUs:  parseDockerNanoCPUs(req.Spec.CPULimit),
-				PidsLimit: &pidsLimit,
+				Memory:           memBytes,
+				MemorySwap:       memSwap,
+				MemorySwappiness: &swappiness,
+				NanoCPUs:         nanoCPUs,
+				CpusetCpus:       cpuset,
+				PidsLimit:        &pidsLimit,
+				Ulimits:          ulimits,
 			},
 			PortBindings: nat.PortMap{
 				port: []nat.PortBinding{{
@@ -205,7 +278,7 @@ func (r *DockerRunner) Start(req StartRequest) (SandboxHandle, error) {
 					HostPort: "",
 				}},
 			},
-			SecurityOpt: []string{"no-new-privileges:true"},
+			SecurityOpt: securityOpt,
 		},
 		&network.NetworkingConfig{},
 		nil,
@@ -245,11 +318,63 @@ func (r *DockerRunner) Start(req StartRequest) (SandboxHandle, error) {
 		StartedAt: time.Now(),
 	}
 
+	// Sample the contestant container's cgroup CPU/memory for the resource
+	// score. A dedicated client (the build/start one is deferred-closed) feeds a
+	// background sampler that writes resource.json into the mounted artifact dir.
+	var sampler *resourceSampler
+	statsCli, statsErr := newDockerClient()
+	if statsErr == nil {
+		var prevCPU, prevSystem uint64
+		sampler = startSampler("docker", filepath.Dir(eventsPath), time.Second,
+			func() (float64, float64, bool) {
+				return sampleContainer(statsCli, containerID, &prevCPU, &prevSystem)
+			})
+	}
+
 	r.mu.Lock()
-	r.containers[sandboxID] = &dockerSandbox{handle: handle, containerID: containerID}
+	r.containers[sandboxID] = &dockerSandbox{handle: handle, containerID: containerID, sampler: sampler, statsCli: statsCli}
 	r.mu.Unlock()
 
 	return handle, nil
+}
+
+// sampleContainer reads one cgroup CPU%/memory(MB) sample for a container. CPU%
+// is computed from the delta in total vs system CPU time across our own ticks
+// (so it doesn't depend on the daemon populating precpu), scaled by online CPUs
+// — the same math `docker stats` uses. The first tick has no delta and reports
+// CPU 0 (memory is still valid).
+func sampleContainer(cli *dockerclient.Client, containerID string, prevCPU, prevSystem *uint64) (float64, float64, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	resp, err := cli.ContainerStats(ctx, containerID, false)
+	if err != nil {
+		return 0, 0, false
+	}
+	defer resp.Body.Close()
+
+	var s types.StatsJSON
+	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+		return 0, 0, false
+	}
+
+	memMB := float64(s.MemoryStats.Usage) / (1024.0 * 1024.0)
+	cur := s.CPUStats.CPUUsage.TotalUsage
+	sys := s.CPUStats.SystemUsage
+
+	cpu := 0.0
+	if *prevCPU != 0 && sys > *prevSystem && cur > *prevCPU {
+		online := float64(s.CPUStats.OnlineCPUs)
+		if online == 0 {
+			online = float64(len(s.CPUStats.CPUUsage.PercpuUsage))
+		}
+		if online == 0 {
+			online = 1
+		}
+		cpu = float64(cur-*prevCPU) / float64(sys-*prevSystem) * online * 100.0
+	}
+	*prevCPU = cur
+	*prevSystem = sys
+	return cpu, memMB, true
 }
 
 func (r *DockerRunner) Stop(sandboxID string) error {
@@ -260,6 +385,12 @@ func (r *DockerRunner) Stop(sandboxID string) error {
 
 	if container == nil {
 		return errors.New("sandbox not found")
+	}
+	if container.sampler != nil {
+		container.sampler.Stop() // final resource.json flush
+	}
+	if container.statsCli != nil {
+		_ = container.statsCli.Close()
 	}
 	return dockerStop(container.containerID)
 }

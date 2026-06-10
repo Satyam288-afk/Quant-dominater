@@ -1,0 +1,50 @@
+# Network fence for the untrusted sandbox namespace. Implements the brief's
+# "no internet egress, no cross-contestant traffic" requirement.
+
+# 1) Default deny: every sandbox pod starts with NO ingress and NO egress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: iicpc-sandbox
+spec:
+  podSelector: {} # all pods
+  policyTypes: ["Ingress", "Egress"]
+---
+# 2) Allow ingress to contestant engines ONLY from the bot fleet in iicpc,
+#    only on the engine port. No path exists between two contestant pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-botfleet-to-engine
+  namespace: iicpc-sandbox
+spec:
+  podSelector:
+    matchLabels: { app: contestant-engine }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: iicpc }
+          podSelector:
+            matchLabels: { app: bot-fleet }
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+# 3) (Optional) allow DNS egress only — uncomment if engines need name
+#    resolution. Left disabled so egress stays fully closed by default.
+# apiVersion: networking.k8s.io/v1
+# kind: NetworkPolicy
+# metadata:
+#   name: allow-dns-egress
+#   namespace: iicpc-sandbox
+# spec:
+#   podSelector: {}
+#   policyTypes: ["Egress"]
+#   egress:
+#     - to:
+#         - namespaceSelector:
+#             matchLabels: { kubernetes.io/metadata.name: kube-system }
+#       ports:
+#         - { protocol: UDP, port: 53 }
+#         - { protocol: TCP, port: 53 }

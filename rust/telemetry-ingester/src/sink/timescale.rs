@@ -81,7 +81,11 @@ async fn flush(pool: &PgPool, buf: &mut Vec<TelemetryEvent>) -> Result<()> {
     }
     let mut q = sqlx::query(&query);
     for e in buf.iter() {
-        let ts_for_time = if e.recv_ts_ns > 0 { e.recv_ts_ns } else { e.send_ts_ns };
+        let ts_for_time = if e.recv_ts_ns > 0 {
+            e.recv_ts_ns
+        } else {
+            e.send_ts_ns
+        };
         q = q
             .bind(ts_for_time as f64)
             .bind(&e.run_id)

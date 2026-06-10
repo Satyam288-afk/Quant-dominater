@@ -20,8 +20,20 @@ type Entry struct {
 	P50MS         float64   `json:"p50_ms,omitempty"`
 	P90MS         float64   `json:"p90_ms,omitempty"`
 	P99MS         float64   `json:"p99_ms,omitempty"`
+	P999MS        float64   `json:"p999_ms,omitempty"`
 	TPS           float64   `json:"tps,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	PeakTPS       float64   `json:"peak_tps,omitempty"`
+	// Score breakdown — populated by the Redis backend from the score-engine
+	// scorecard so the leaderboard UI can render the composite components.
+	LatencyScore    float64 `json:"latency_score,omitempty"`
+	ThroughputScore float64 `json:"throughput_score,omitempty"`
+	StabilityScore  float64 `json:"stability_score,omitempty"`
+	ResourceScore   float64 `json:"resource_score,omitempty"`
+	OrdersSent      int64   `json:"orders_sent,omitempty"`
+	AcksReceived    int64   `json:"acks_received,omitempty"`
+	Timeouts        int64   `json:"timeouts,omitempty"`
+
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type Board struct {

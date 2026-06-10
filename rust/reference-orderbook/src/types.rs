@@ -10,16 +10,13 @@ pub enum Side {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
+#[derive(Default)]
 pub enum OrderType {
+    #[default]
     Limit,
     Market,
 }
 
-impl Default for OrderType {
-    fn default() -> Self {
-        Self::Limit
-    }
-}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NewOrder {

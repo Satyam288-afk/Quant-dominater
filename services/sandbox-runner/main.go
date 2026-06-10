@@ -1,17 +1,24 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	"sandbox-runner/internal/api"
 	"sandbox-runner/internal/sandbox"
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
 	repoRoot, err := resolveRepoRoot()
 	if err != nil {
 		log.Fatal(err)
@@ -43,8 +50,24 @@ func main() {
 		addr = ":9200"
 	}
 
-	log.Printf("sandbox runner listening on %s repo_root=%s mode=%s", addr, repoRoot, mode)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		log.Printf("sandbox runner listening on %s repo_root=%s mode=%s", addr, repoRoot, mode)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("listen: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	stop()
+	log.Printf("shutdown signal received; draining in-flight sandbox requests")
+	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutCtx); err != nil {
+		log.Printf("shutdown: %v", err)
+	} else {
+		log.Printf("sandbox runner drained cleanly")
+	}
 }
 
 func resolveRepoRoot() (string, error) {

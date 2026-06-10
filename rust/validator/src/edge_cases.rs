@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::replay::{Event, EventKind};
 use reference_orderbook::Fill;
@@ -26,29 +26,48 @@ pub fn detect(
 ) -> Vec<Violation> {
     let mut out = Vec::new();
 
-    // Known order ids and remaining qty per id (from new_order events).
+    // Known order ids and remaining qty per id (from new_order events). Cancels
+    // need no bookkeeping here — the diff validates them in arrival order.
     let mut placed_qty: HashMap<String, i64> = HashMap::new();
-    let mut cancelled_after_line: HashMap<String, usize> = HashMap::new();
     for ev in events {
-        match &ev.kind {
-            EventKind::NewOrder(order) => {
-                placed_qty.insert(order.client_order_id.clone(), order.qty);
-            }
-            EventKind::Cancel { orig_client_order_id } => {
-                cancelled_after_line.insert(orig_client_order_id.clone(), ev.line_no);
-            }
+        if let EventKind::NewOrder(order) = &ev.kind {
+            placed_qty.insert(order.client_order_id.clone(), order.qty);
         }
     }
 
-    // DUPLICATE_FILL: any raw fill that the main loop discarded as a dupe.
-    if raw_actual.len() > deduped_actual.len() {
-        out.push(Violation {
-            reason: "DUPLICATE_FILL",
-            detail: json!({
-                "raw_count": raw_actual.len(),
-                "unique_count": deduped_actual.len(),
-            }),
-        });
+    // INCONSISTENT_FILL: a fill (identified by engine_seq) is reported to BOTH
+    // counterparties — and, through the bot fleet's connection pool, by every
+    // connection that carries one of those counterparties. So the SAME fill
+    // legitimately appears multiple times in contestant_outputs.jsonl; that is
+    // correct two-sided execution reporting, not a bug. We dedup those identical
+    // copies elsewhere by engine_seq. The real violation is when two reports
+    // share an engine_seq but DISAGREE on the trade (buy/sell/price/qty) — that
+    // means the engine emitted an inconsistent execution report. Only flag that.
+    let mut by_seq: HashMap<u64, &Fill> = HashMap::new();
+    for entry in raw_actual {
+        let Some(seq) = entry.engine_seq else { continue };
+        match by_seq.get(&seq) {
+            Some(prev)
+                if prev.buy_order_id != entry.fill.buy_order_id
+                    || prev.sell_order_id != entry.fill.sell_order_id
+                    || prev.price != entry.fill.price
+                    || prev.qty != entry.fill.qty =>
+            {
+                out.push(Violation {
+                    reason: "INCONSISTENT_FILL",
+                    detail: json!({
+                        "engine_seq": seq,
+                        "first": prev,
+                        "second": entry.fill,
+                    }),
+                });
+                break;
+            }
+            Some(_) => {}
+            None => {
+                by_seq.insert(seq, &entry.fill);
+            }
+        }
     }
 
     // OUT_OF_ORDER_SEQ: engine_seq must be monotonically non-decreasing.
@@ -114,31 +133,13 @@ pub fn detect(
         });
     }
 
-    // CANCEL_RACE: a fill landing for an id whose cancel was emitted in the
-    // events stream. We don't have ack timestamps here, but we have the
-    // events file ordering: if a cancel exists for an id, ANY subsequent
-    // fill for that id is racy. Reported once.
-    let mut cancel_race_id: Option<String> = None;
-    let cancelled_ids: HashSet<&String> = cancelled_after_line.keys().collect();
-    for entry in deduped_actual {
-        let f = &entry.fill;
-        if cancelled_ids.contains(&f.buy_order_id) || cancelled_ids.contains(&f.sell_order_id) {
-            cancel_race_id = Some(
-                if cancelled_ids.contains(&f.buy_order_id) {
-                    f.buy_order_id.clone()
-                } else {
-                    f.sell_order_id.clone()
-                },
-            );
-            break;
-        }
-    }
-    if let Some(id) = cancel_race_id {
-        out.push(Violation {
-            reason: "CANCEL_RACE",
-            detail: json!({ "client_order_id": id }),
-        });
-    }
+    // NOTE: we deliberately do NOT flag a "cancel race" — a cancel that arrives
+    // after its order already traded legitimately returns not_found, and the
+    // fill stands. The authoritative check is the diff: the reference replays
+    // cancels in the engine's true arrival order (by ack engine_seq), so if the
+    // engine ever filled a genuinely-cancelled order the diff surfaces it as an
+    // UNEXPECTED_FILL / PRICE_TIME_PRIORITY_VIOLATION. A heuristic that flags
+    // any fill for a once-cancelled id only produces false positives here.
 
     out
 }

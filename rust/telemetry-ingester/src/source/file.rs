@@ -12,11 +12,7 @@ pub async fn run(path: PathBuf, tx: mpsc::Sender<TelemetryEvent>) -> Result<()> 
         .with_context(|| format!("opening {:?}", path))?;
     let reader = BufReader::new(file);
     let mut lines = reader.lines();
-    while let Some(line) = lines
-        .next_line()
-        .await
-        .context("reading telemetry line")?
-    {
+    while let Some(line) = lines.next_line().await.context("reading telemetry line")? {
         if line.trim().is_empty() {
             continue;
         }

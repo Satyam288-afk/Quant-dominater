@@ -52,6 +52,25 @@ Optional fields:
 }
 ```
 
+## Market Order
+
+A market order crosses whatever is resting and any unfilled remainder is
+discarded (it never rests). `price` is ignored and may be `0`.
+
+```json
+{
+  "type": "new_order",
+  "run_id": "run_001",
+  "client_order_id": "bot_1_0009",
+  "side": "SELL",
+  "symbol": "SYM_1",
+  "price": 0,
+  "qty": 4,
+  "ts_ns": 1770000000000090000,
+  "order_type": "MARKET"
+}
+```
+
 ## Cancel Order
 
 ```json
@@ -104,8 +123,18 @@ not_found
 The bot fleet writes canonical input orders to `events.jsonl`:
 
 ```json
-{"event_type":"order_sent","run_id":"run_local_001","bot_id":"bot_1","seq_no":1,"send_ts_ns":1770000000000000001,"order":{"type":"new_order","run_id":"run_local_001","client_order_id":"bot_1_000001","symbol":"SYM_1","side":"BUY","price":10025,"qty":10,"ts_ns":1770000000000000001}}
+{"event_type":"order_sent","run_id":"run_local_001","bot_id":"bot_1","seq_no":1,"send_ts_ns":1770000000000000001,"order":{"type":"new_order","run_id":"run_local_001","client_order_id":"bot_1_000001","symbol":"SYM_1","side":"BUY","price":10025,"qty":10,"ts_ns":1770000000000000001,"order_type":"LIMIT"}}
 ```
+
+A cancel is written the same way, under a `cancel_sent` event:
+
+```json
+{"event_type":"cancel_sent","run_id":"run_local_001","bot_id":"bot_1","seq_no":3,"send_ts_ns":1770000000000003000,"order":{"type":"cancel_order","run_id":"run_local_001","client_order_id":"bot_1_c000003","orig_client_order_id":"bot_1_000001","ts_ns":1770000000000003000}}
+```
+
+The validator reconstructs the engine's true arrival order from the ack
+`engine_seq` (not the send order) before replaying, so new orders and cancels
+are diffed in exactly the sequence the engine processed them.
 
 The bot fleet writes contestant outputs to `contestant_outputs.jsonl`:
 

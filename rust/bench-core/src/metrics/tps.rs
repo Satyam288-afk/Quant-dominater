@@ -35,7 +35,7 @@ impl TpsCounter {
                 buckets.iter_mut().for_each(|b| *b = 0);
             } else {
                 buckets.drain(0..shift);
-                buckets.extend(std::iter::repeat(0).take(shift));
+                buckets.extend(std::iter::repeat_n(0, shift));
             }
             self.start_ns
                 .store(start + (shift as u64) * self.bucket_ns, Ordering::Relaxed);

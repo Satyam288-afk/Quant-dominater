@@ -30,10 +30,11 @@ type localImage struct {
 }
 
 type localSandbox struct {
-	handle SandboxHandle
-	cmd    *exec.Cmd
-	done   chan error
-	log    *os.File
+	handle  SandboxHandle
+	cmd     *exec.Cmd
+	done    chan error
+	log     *os.File
+	sampler *resourceSampler
 }
 
 func NewLocalRunner(repoRoot string, runRoot string) *LocalRunner {
@@ -198,8 +199,14 @@ func (r *LocalRunner) Start(req StartRequest) (SandboxHandle, error) {
 		StartedAt: time.Now(),
 	}
 
+	// Sample the engine process's CPU/RSS for the run's resource score. Writes
+	// resource.json into the artifact dir (next to engine outputs) so the
+	// orchestrator can fold peak usage into the 10% resource term.
+	sampler := startSampler("ps", filepath.Dir(eventsPath), 250*time.Millisecond,
+		func() (float64, float64, bool) { return samplePID(cmd.Process.Pid) })
+
 	r.mu.Lock()
-	r.sandboxes[sandboxID] = &localSandbox{handle: handle, cmd: cmd, done: done, log: logFile}
+	r.sandboxes[sandboxID] = &localSandbox{handle: handle, cmd: cmd, done: done, log: logFile, sampler: sampler}
 	r.mu.Unlock()
 
 	return handle, nil
@@ -213,6 +220,9 @@ func (r *LocalRunner) Stop(sandboxID string) error {
 
 	if sandbox == nil {
 		return errors.New("sandbox not found")
+	}
+	if sandbox.sampler != nil {
+		sandbox.sampler.Stop() // final resource.json flush
 	}
 	return stopProcess(sandbox.cmd, sandbox.done)
 }

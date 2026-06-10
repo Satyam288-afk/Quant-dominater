@@ -86,6 +86,7 @@ pub(crate) struct ScoreJson {
     pub(crate) p99_ms: f64,
     pub(crate) p999_ms: f64,
     pub(crate) tps: f64,
+    pub(crate) peak_tps: f64,
     pub(crate) orders_sent: i64,
     pub(crate) acks_received: i64,
     pub(crate) timeouts: i64,
@@ -196,6 +197,7 @@ async fn main() -> Result<()> {
         p99_ms: metrics.p99_ms,
         p999_ms: metrics.p999_ms,
         tps: metrics.tps,
+        peak_tps: metrics.peak_tps,
         orders_sent: metrics.orders_sent,
         acks_received: metrics.acks_received,
         timeouts: metrics.timeouts,
@@ -231,6 +233,13 @@ async fn main() -> Result<()> {
                 eprintln!("warning: redis leaderboard publish failed: {err:#}");
             }
         }
+        if !args.timescale_url.is_empty() && !args.redis_url.is_empty() {
+            if let Err(err) =
+                live::publish_latency_series(&args.timescale_url, &args.redis_url, &run_id).await
+            {
+                eprintln!("warning: latency series publish failed: {err:#}");
+            }
+        }
     }
 
     Ok(())
@@ -242,6 +251,7 @@ pub(crate) struct ExtractedMetrics {
     pub(crate) p99_ms: f64,
     pub(crate) p999_ms: f64,
     pub(crate) tps: f64,
+    pub(crate) peak_tps: f64,
     pub(crate) orders_sent: i64,
     pub(crate) acks_received: i64,
     pub(crate) timeouts: i64,
@@ -274,6 +284,8 @@ fn extract_metrics(value: &Value, run_id: &str) -> Option<ExtractedMetrics> {
             p99_ms: number(value, "p99_ms"),
             p999_ms: 0.0,
             tps: number(value, "tps"),
+            // Go metrics.json has no per-second peak; fall back to average.
+            peak_tps: number_or(value, "peak_tps", number(value, "tps")),
             orders_sent: int(value, "orders_sent"),
             acks_received: int(value, "acks_received"),
             timeouts: int(value, "timeouts"),
@@ -293,6 +305,7 @@ fn extract_metrics(value: &Value, run_id: &str) -> Option<ExtractedMetrics> {
                 p99_ms: number(r, "p99_ms"),
                 p999_ms: number(r, "p999_ms"),
                 tps: number(r, "tps"),
+                peak_tps: number_or(r, "peak_tps", number(r, "tps")),
                 orders_sent: int(r, "orders_sent"),
                 acks_received: int(r, "acks_received"),
                 timeouts: int(r, "timeouts"),
@@ -306,6 +319,12 @@ fn extract_metrics(value: &Value, run_id: &str) -> Option<ExtractedMetrics> {
 
 fn number(value: &Value, key: &str) -> f64 {
     value.get(key).and_then(Value::as_f64).unwrap_or(0.0)
+}
+
+/// Like `number`, but returns `default` when the key is missing (rather than 0),
+/// so an older metrics file without `peak_tps` degrades to average TPS.
+fn number_or(value: &Value, key: &str, default: f64) -> f64 {
+    value.get(key).and_then(Value::as_f64).unwrap_or(default)
 }
 
 fn int(value: &Value, key: &str) -> i64 {
