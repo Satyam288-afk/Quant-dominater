@@ -65,6 +65,12 @@ func main() {
 		rootCtx: rootCtx,
 	}
 
+	// Repo root locates the static UI dir (served at /) and the file-backed store.
+	repoRoot, err := resolveRepoRoot()
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	// Backend selection. `redis` serves the live leaderboard straight from the
 	// data plane (ZSET + scorecards written by the score-engine). `file` is the
 	// dependency-free fallback used by the local slice and unit tests.
@@ -95,10 +101,6 @@ func main() {
 		handler.live = rb
 		source = "redis:" + redisURL
 	default:
-		repoRoot, err := resolveRepoRoot()
-		if err != nil {
-			log.Fatal(err)
-		}
 		path := os.Getenv("LEADERBOARD_STORE_PATH")
 		if path == "" {
 			path = filepath.Join(repoRoot, ".leaderboard", "leaderboard.json")
@@ -119,6 +121,13 @@ func main() {
 	mux.HandleFunc("GET /runs/{id}/live", handler.LiveRun)
 	mux.HandleFunc("GET /runs/{id}/timeseries", handler.RunTimeseries)
 	mux.HandleFunc("GET /ws", handler.WS)
+	uiDir := os.Getenv("LEADERBOARD_UI_DIR")
+	if uiDir == "" {
+		uiDir = filepath.Join(repoRoot, "web", "leaderboard-ui")
+	}
+	if fileExists(filepath.Join(uiDir, "index.html")) {
+		mux.Handle("GET /", http.FileServer(http.Dir(uiDir)))
+	}
 
 	addr := os.Getenv("LEADERBOARD_API_ADDR")
 	if addr == "" {

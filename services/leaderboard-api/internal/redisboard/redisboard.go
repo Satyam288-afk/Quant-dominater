@@ -328,9 +328,9 @@ func atof(s string, def float64) float64 {
 	return v
 }
 
-func atoi(s string) int64 {
+func atoi(s string) int {
 	v, _ := strconv.ParseInt(s, 10, 64)
-	return v
+	return int(v)
 }
 
 func boolToInt(b bool) int {

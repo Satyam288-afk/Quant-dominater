@@ -37,6 +37,7 @@ local data plane** (Redpanda + TimescaleDB + Redis via docker-compose), and a
 | Path | Purpose |
 |---|---|
 | `docs/API_CONTRACT.md` | WebSocket/REST message contract |
+| `docs/PRODUCTION_GAP_ANALYSIS.md` | Current production-readiness status and remaining work |
 | `proto/benchmark.proto` | Protobuf version of the benchmark messages |
 | `examples/stub-engine` | Go WebSocket/REST contestant engine stub |
 | `examples/rust-engine` | Rust WebSocket contestant engine stub |
@@ -45,6 +46,7 @@ local data plane** (Redpanda + TimescaleDB + Redis via docker-compose), and a
 | `services/orchestrator` | Go lifecycle manager for queued benchmark runs |
 | `services/score-engine` | Go scoring API for local run artifacts |
 | `services/leaderboard-api` | Go live leaderboard API with WebSocket fanout |
+| `services/console-api` | Browser-facing gateway for upload, run control, leaderboard, and artifacts |
 | `rust/bot-fleet` | Rust Tokio bot fleet and local metrics collector |
 | `rust/reference-orderbook` | Deterministic price-time reference matcher |
 | `rust/validator` | Replays inputs and compares contestant fills |
@@ -60,6 +62,8 @@ local data plane** (Redpanda + TimescaleDB + Redis via docker-compose), and a
 | `scripts/run-live-demo.sh` | Full data-plane demo (Redpanda→Timescale→Redis→leaderboard) |
 | `scripts/run-price-time-proof.sh` | Correct engine vs intentionally broken engine proof |
 | `scripts/run-chaos-demo.sh` | Failure-injection demo: kill the engine mid-run → fleet reconnects; SIGTERM a service → graceful drain (no Docker needed) |
+| `scripts/run-platform-demo.sh` | Submission-to-leaderboard local platform demo |
+| `scripts/run-console-stack.sh` | Interactive browser console stack |
 
 ## Prerequisites
 
@@ -147,6 +151,38 @@ make score-engine
 make leaderboard-api
 ```
 
+The leaderboard API serves a minimal live UI at:
+
+```text
+http://localhost:9500/
+```
+
+## Run The Browser Console
+
+This starts an interactive local platform console instead of only running a
+scripted demo. The browser talks to one gateway service, then the gateway calls
+the submission API, orchestrator, and leaderboard API.
+
+```bash
+make console-stack
+```
+
+Open:
+
+```text
+http://localhost:9700/
+```
+
+The script also creates an example upload artifact:
+
+```text
+.runs/console-stack/stub-engine.zip
+```
+
+Use the console to upload that ZIP, configure bots/rate/duration/resource
+limits, start the benchmark, watch the lifecycle timeline, inspect artifacts,
+and see the leaderboard update.
+
 Use Docker-backed sandboxing when Docker is running:
 
 ```bash
@@ -202,6 +238,63 @@ Deploy to a real cluster:
 cd infra/terraform && tofu init && tofu apply      # VPC + EKS + ECR
 $(cd infra/terraform && tofu output -raw configure_kubectl)
 kubectl apply -k infra/k8s                          # the benchmark cell
+```
+
+In Docker mode, `network_egress=false` creates a per-sandbox internal Docker
+bridge network. The engine is still reachable by the local bot fleet through a
+random localhost port, but the contestant container does not get normal outbound
+internet access.
+
+## Run The Upload-To-Leaderboard Demo
+
+This starts the local submission API, sandbox runner, orchestrator, and leaderboard API, uploads the example Go engine as a ZIP, creates a benchmark run, waits for scoring, and prints the generated artifact set.
+
+```bash
+./scripts/run-platform-demo.sh
+```
+
+Keep the demo services running after the run if you want to open the live UI:
+
+```bash
+KEEP_SERVICES=1 \
+SUBMISSION_API_ADDR=:9610 \
+SANDBOX_RUNNER_ADDR=:9620 \
+ORCHESTRATOR_ADDR=:9630 \
+LEADERBOARD_API_ADDR=:9650 \
+./scripts/run-platform-demo.sh
+```
+
+Then open `http://localhost:9650/` in a browser.
+
+The demo owns ports `9100`, `9200`, `9300`, and `9500`. If one is already in use,
+the script fails fast instead of publishing to stale local services. For a clean
+demo board:
+
+```bash
+make reset-demo-state
+```
+
+The script uses a private submission index and artifact root under
+`.runs/platform-demo/`, then explicitly starts the run through its own
+orchestrator. This avoids interference from any long-running local orchestrator
+watching the default `.artifacts/submissions/index.json` store.
+
+Expected run artifact shape:
+
+```text
+.runs/{run_id}/
+├── config.json
+├── orders.jsonl
+├── acks.jsonl
+├── fills.jsonl
+├── cancels.jsonl
+├── metrics.json
+├── validation.json
+├── score.json
+├── build.json
+├── sandbox.json
+├── run_spec.json
+└── run.log
 ```
 
 ## Prove The Validator Is Real

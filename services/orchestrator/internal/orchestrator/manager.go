@@ -247,6 +247,9 @@ func (m *Manager) BenchmarkEndpoint(ctx context.Context, req model.DirectBenchma
 	if err := m.writeRunSpec(run); err != nil {
 		return nil, err
 	}
+	if err := writeJSONFile(filepath.Join(run.ArtifactDir, "config.json"), req); err != nil {
+		return nil, err
+	}
 	_ = appendRunLog(run, "direct benchmark started")
 
 	metrics, err := m.botfleet.Run(runCtx, run, endpoint)
@@ -306,6 +309,10 @@ func (m *Manager) execute(ctx context.Context, run *model.BenchmarkRun) {
 		return
 	}
 	if err := createArtifactPlaceholders(run.ArtifactDir); err != nil {
+		m.fail(ctx, run, "PREPARE_ARTIFACTS", err)
+		return
+	}
+	if err := writeJSONFile(filepath.Join(run.ArtifactDir, "config.json"), run.Config); err != nil {
 		m.fail(ctx, run, "PREPARE_ARTIFACTS", err)
 		return
 	}
@@ -506,16 +513,25 @@ func mergeResourceSample(artifactDir string, metrics *model.Metrics) {
 }
 
 func (m *Manager) writeRunSpec(run *model.BenchmarkRun) error {
-	data, err := json.MarshalIndent(run, "", "  ")
+	return writeJSONFile(filepath.Join(run.ArtifactDir, "run_spec.json"), run)
+}
+
+func writeJSONFile(path string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(filepath.Join(run.ArtifactDir, "run_spec.json"), data, 0o644)
+	return os.WriteFile(path, data, 0o644)
 }
 
 func createArtifactPlaceholders(dir string) error {
 	names := []string{
+		"config.json",
+		"orders.jsonl",
+		"acks.jsonl",
+		"fills.jsonl",
+		"cancels.jsonl",
 		"run_spec.json",
 		"build.json",
 		"sandbox.json",

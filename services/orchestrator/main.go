@@ -29,7 +29,11 @@ func main() {
 		log.Fatal(err)
 	}
 
-	st := store.NewJSONStore(filepath.Join(repoRoot, ".artifacts", "submissions", "index.json"))
+	storePath := envPath("ORCHESTRATOR_STORE_PATH", "")
+	if storePath == "" {
+		storePath = envPath("SUBMISSION_INDEX_PATH", filepath.Join(repoRoot, ".artifacts", "submissions", "index.json"))
+	}
+	st := store.NewJSONStore(storePath)
 	sandboxRunnerURL := os.Getenv("SANDBOX_RUNNER_URL")
 	if sandboxRunnerURL == "" {
 		sandboxRunnerURL = "http://127.0.0.1:9200"
@@ -149,4 +153,16 @@ func resolveRepoRoot() (string, error) {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func envPath(name string, fallback string) string {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	abs, err := filepath.Abs(value)
+	if err != nil {
+		return value
+	}
+	return abs
 }

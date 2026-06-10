@@ -29,6 +29,14 @@ The API listens on `:9100` by default. Override with:
 SUBMISSION_API_ADDR=:9101 make submission-api
 ```
 
+For isolated local demos or tests, override the metadata/artifact paths:
+
+```bash
+SUBMISSION_ARTIFACT_ROOT=.runs/platform-demo/submissions \
+SUBMISSION_INDEX_PATH=.runs/platform-demo/submissions/index.json \
+make submission-api
+```
+
 ## Endpoints
 
 ```text

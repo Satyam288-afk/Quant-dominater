@@ -41,6 +41,7 @@ type DockerRunner struct {
 type dockerSandbox struct {
 	handle      SandboxHandle
 	containerID string
+	networkID   string
 	sampler     *resourceSampler
 	statsCli    *dockerclient.Client
 }
@@ -180,6 +181,23 @@ func (r *DockerRunner) Start(req StartRequest) (SandboxHandle, error) {
 		return SandboxHandle{}, err
 	}
 
+	networkPlan := dockerNetworkPlanFor(req.Spec, sandboxID)
+	if networkPlan.isolated {
+		created, err := cli.NetworkCreate(ctx, networkPlan.name, types.NetworkCreate{
+			Driver:   "bridge",
+			Internal: true,
+			Labels: map[string]string{
+				"iicpc.component":  "sandbox-runner",
+				"iicpc.run_id":     req.RunID,
+				"iicpc.sandbox_id": sandboxID,
+			},
+		})
+		if err != nil {
+			return SandboxHandle{}, fmt.Errorf("docker network create failed: %w", err)
+		}
+		networkPlan.id = created.ID
+	}
+
 	pidsLimit := int64(512)
 	memBytes := parseDockerMemoryBytes(req.Spec.MemoryLimit)
 	nanoCPUs := parseDockerNanoCPUs(req.Spec.CPULimit)
@@ -222,15 +240,9 @@ func (r *DockerRunner) Start(req StartRequest) (SandboxHandle, error) {
 	// artifacts dir and a small, locked-down tmpfs.
 	tmpfs := map[string]string{"/tmp": "rw,noexec,nosuid,nodev,size=64m"}
 
-	// Network: bridge with a loopback-bound published port for the bot fleet.
-	// Internet / cross-contestant egress is denied in production by the per-cell
-	// Kubernetes NetworkPolicy (infra/k8s). For Docker an operator can pin an
-	// internal network via SANDBOX_DOCKER_NETWORK; with egress disabled (the
-	// default) DNS is also black-holed as defense-in-depth.
-	networkMode := container.NetworkMode("bridge")
-	if n := strings.TrimSpace(os.Getenv("SANDBOX_DOCKER_NETWORK")); n != "" {
-		networkMode = container.NetworkMode(n)
-	}
+	// Network mode comes from the per-sandbox network plan (bridge, or an
+	// isolated internal network when requested). With egress disabled (the
+	// default) DNS is black-holed as defense-in-depth.
 	var dns []string
 	if !req.Spec.NetworkEgress {
 		dns = []string{"127.0.0.1"}
@@ -243,6 +255,12 @@ func (r *DockerRunner) Start(req StartRequest) (SandboxHandle, error) {
 		securityOpt = append(securityOpt, "seccomp="+profile)
 	}
 
+	networkingConfig := &network.NetworkingConfig{}
+	if networkPlan.isolated {
+		networkingConfig.EndpointsConfig = map[string]*network.EndpointSettings{
+			networkPlan.name: {},
+		}
+	}
 	createResp, err := cli.ContainerCreate(
 		ctx,
 		&container.Config{
@@ -258,7 +276,7 @@ func (r *DockerRunner) Start(req StartRequest) (SandboxHandle, error) {
 				filepath.Dir(eventsPath) + ":/artifacts",
 			},
 			CapDrop:        []string{"ALL"},
-			NetworkMode:    networkMode,
+			NetworkMode:    networkPlan.mode,
 			ReadonlyRootfs: true,
 			Runtime:        strings.TrimSpace(os.Getenv("SANDBOX_DOCKER_RUNTIME")),
 			DNS:            dns,
@@ -280,42 +298,49 @@ func (r *DockerRunner) Start(req StartRequest) (SandboxHandle, error) {
 			},
 			SecurityOpt: securityOpt,
 		},
-		&network.NetworkingConfig{},
+		networkingConfig,
 		nil,
 		sandboxID,
 	)
 	if err != nil {
+		_ = dockerRemoveNetwork(networkPlan.id)
 		return SandboxHandle{}, fmt.Errorf("docker container create failed: %w", err)
 	}
 	containerID := createResp.ID
 	if containerID == "" {
+		_ = dockerRemoveNetwork(networkPlan.id)
 		return SandboxHandle{}, errors.New("docker container create returned empty id")
 	}
 	if err := cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
 		_ = dockerStop(containerID)
+		_ = dockerRemoveNetwork(networkPlan.id)
 		return SandboxHandle{}, fmt.Errorf("docker container start failed: %w", err)
 	}
 
 	hostPort, err := dockerHostPort(containerID, port)
 	if err != nil {
 		_ = dockerStop(containerID)
+		_ = dockerRemoveNetwork(networkPlan.id)
 		return SandboxHandle{}, err
 	}
 
 	healthURL := "http://127.0.0.1:" + hostPort + "/health"
 	if err := waitForHealth(context.Background(), healthURL); err != nil {
 		_ = dockerStop(containerID)
+		_ = dockerRemoveNetwork(networkPlan.id)
 		return SandboxHandle{}, err
 	}
 
 	handle := SandboxHandle{
-		SandboxID: sandboxID,
-		RunID:     req.RunID,
-		ImageRef:  req.ImageRef,
-		Endpoint:  "ws://127.0.0.1:" + hostPort + "/ws",
-		HealthURL: healthURL,
-		Spec:      req.Spec,
-		StartedAt: time.Now(),
+		SandboxID:       sandboxID,
+		RunID:           req.RunID,
+		ImageRef:        req.ImageRef,
+		Endpoint:        "ws://127.0.0.1:" + hostPort + "/ws",
+		HealthURL:       healthURL,
+		Spec:            req.Spec,
+		NetworkName:     networkPlan.name,
+		NetworkIsolated: networkPlan.isolated,
+		StartedAt:       time.Now(),
 	}
 
 	// Sample the contestant container's cgroup CPU/memory for the resource
@@ -332,7 +357,7 @@ func (r *DockerRunner) Start(req StartRequest) (SandboxHandle, error) {
 	}
 
 	r.mu.Lock()
-	r.containers[sandboxID] = &dockerSandbox{handle: handle, containerID: containerID, sampler: sampler, statsCli: statsCli}
+	r.containers[sandboxID] = &dockerSandbox{handle: handle, containerID: containerID, networkID: networkPlan.id, sampler: sampler, statsCli: statsCli}
 	r.mu.Unlock()
 
 	return handle, nil
@@ -392,7 +417,12 @@ func (r *DockerRunner) Stop(sandboxID string) error {
 	if container.statsCli != nil {
 		_ = container.statsCli.Close()
 	}
-	return dockerStop(container.containerID)
+	stopErr := dockerStop(container.containerID)
+	networkErr := dockerRemoveNetwork(container.networkID)
+	if stopErr != nil {
+		return stopErr
+	}
+	return networkErr
 }
 
 func (r *DockerRunner) Get(sandboxID string) (SandboxHandle, bool) {
@@ -467,6 +497,49 @@ func dockerStop(containerID string) error {
 
 	if err := cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil && !errdefs.IsNotFound(err) {
 		return fmt.Errorf("docker container remove failed: %w", err)
+	}
+	return nil
+}
+
+type dockerNetworkPlan struct {
+	mode     container.NetworkMode
+	name     string
+	id       string
+	isolated bool
+}
+
+func dockerNetworkPlanFor(spec SandboxSpec, sandboxID string) dockerNetworkPlan {
+	if spec.NetworkEgress {
+		return dockerNetworkPlan{
+			mode: "bridge",
+			name: "bridge",
+		}
+	}
+
+	name := "iicpc-" + sanitizeDockerTag(sandboxID)
+	return dockerNetworkPlan{
+		mode:     container.NetworkMode(name),
+		name:     name,
+		isolated: true,
+	}
+}
+
+func dockerRemoveNetwork(networkID string) error {
+	if networkID == "" {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cli, err := newDockerClient()
+	if err != nil {
+		return err
+	}
+	defer cli.Close()
+
+	if err := cli.NetworkRemove(ctx, networkID); err != nil && !errdefs.IsNotFound(err) {
+		return fmt.Errorf("docker network remove failed: %w", err)
 	}
 	return nil
 }

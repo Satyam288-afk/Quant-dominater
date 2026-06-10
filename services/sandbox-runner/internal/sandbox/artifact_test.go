@@ -19,6 +19,18 @@ func TestResolveLocalArtifact(t *testing.T) {
 	}
 }
 
+func TestResolveLocalArtifactUsesCustomSubmissionRoot(t *testing.T) {
+	t.Setenv("SUBMISSION_ARTIFACT_ROOT", "/tmp/demo-submissions")
+	got, err := resolveLocalArtifact("/repo", "local://submissions/sub_1/engine.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "/tmp/demo-submissions/sub_1/engine.zip"
+	if got != want {
+		t.Fatalf("resolveLocalArtifact() = %q, want %q", got, want)
+	}
+}
+
 func TestResolveLocalArtifactRejectsTraversal(t *testing.T) {
 	_, err := resolveLocalArtifact("/repo", "local://submissions/../secret.zip")
 	if err == nil {

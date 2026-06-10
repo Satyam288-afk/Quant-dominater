@@ -1,9 +1,11 @@
 package executor
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -53,8 +55,107 @@ func (b *BotFleet) Run(ctx context.Context, r *run.BenchmarkRun, endpoint string
 	if err := os.WriteFile(filepath.Join(r.ArtifactDir, "metrics.json"), data, 0o644); err != nil {
 		return nil, err
 	}
+	if err := writeSplitArtifacts(eventsOut, outputsOut, r.ArtifactDir); err != nil {
+		return nil, err
+	}
 
 	return metrics, nil
+}
+
+func writeSplitArtifacts(eventsPath, outputsPath, artifactDir string) error {
+	if err := copyFile(eventsPath, filepath.Join(artifactDir, "orders.jsonl")); err != nil {
+		return err
+	}
+	return splitOutputs(outputsPath, artifactDir)
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
+}
+
+func splitOutputs(outputsPath, artifactDir string) error {
+	in, err := os.Open(outputsPath)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	acks, err := os.Create(filepath.Join(artifactDir, "acks.jsonl"))
+	if err != nil {
+		return err
+	}
+	defer acks.Close()
+
+	fills, err := os.Create(filepath.Join(artifactDir, "fills.jsonl"))
+	if err != nil {
+		return err
+	}
+	defer fills.Close()
+
+	cancels, err := os.Create(filepath.Join(artifactDir, "cancels.jsonl"))
+	if err != nil {
+		return err
+	}
+	defer cancels.Close()
+
+	scanner := bufio.NewScanner(in)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		switch outputKind(line) {
+		case "ack":
+			if _, err := acks.Write(append(line, '\n')); err != nil {
+				return err
+			}
+		case "fill":
+			if _, err := fills.Write(append(line, '\n')); err != nil {
+				return err
+			}
+		case "cancel":
+			if _, err := cancels.Write(append(line, '\n')); err != nil {
+				return err
+			}
+		}
+	}
+	return scanner.Err()
+}
+
+func outputKind(line []byte) string {
+	var raw struct {
+		EventType string `json:"event_type"`
+		Message   struct {
+			Type   string `json:"type"`
+			Status string `json:"status"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(line, &raw); err != nil {
+		return ""
+	}
+	if strings.Contains(raw.EventType, "ack") || raw.Message.Type == "ack" {
+		if raw.Message.Status == "canceled" {
+			return "cancel"
+		}
+		return "ack"
+	}
+	if strings.Contains(raw.EventType, "fill") || raw.Message.Type == "fill" {
+		return "fill"
+	}
+	if strings.Contains(raw.EventType, "cancel") || raw.Message.Type == "cancel_order" {
+		return "cancel"
+	}
+	return ""
 }
 
 func parseMetrics(text string) *run.Metrics {

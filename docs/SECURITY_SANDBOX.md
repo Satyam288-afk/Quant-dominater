@@ -42,6 +42,26 @@ plus **binary** for a pre-compiled engine. See `writeDefaultDockerfile`.
 > (which the VM honors) remains the effective control. On a Linux host / EKS
 > node the pin applies as intended (`docker_runner.go`).
 
+## Current Docker Enforcement
+
+Docker mode currently applies:
+
+```text
+cap_drop=ALL
+no-new-privileges=true
+read-only root filesystem
+PID limit
+CPU limit from sandbox.cpu_limit
+memory limit from sandbox.memory_limit
+localhost-only published engine port
+per-sandbox internal Docker network when network_egress=false
+container/network cleanup after run completion
+```
+
+This is still not equivalent to a hardened multi-tenant cloud sandbox. The next
+security step is to run the same container under gVisor/rootless BuildKit and
+prove egress denial with an automated malicious-submission fixture.
+
 ## Allowed Network Paths
 
 ```text
@@ -60,4 +80,3 @@ Sandboxing is required for production, but it should not be the first implementa
 3. replayable input logs
 4. correctness validation
 5. score generation
-

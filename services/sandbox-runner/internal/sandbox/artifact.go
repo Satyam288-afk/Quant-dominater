@@ -23,12 +23,23 @@ func resolveLocalArtifact(repoRoot string, artifactURI string) (string, error) {
 			strings.HasPrefix(cleanRel, ".."+string(os.PathSeparator)) {
 			return "", fmt.Errorf("invalid artifact uri: %s", artifactURI)
 		}
-		return filepath.Join(repoRoot, ".artifacts", "submissions", cleanRel), nil
+		return filepath.Join(submissionArtifactRoot(repoRoot), cleanRel), nil
 	}
 	if filepath.IsAbs(artifactURI) {
 		return artifactURI, nil
 	}
 	return filepath.Join(repoRoot, artifactURI), nil
+}
+
+func submissionArtifactRoot(repoRoot string) string {
+	if root := os.Getenv("SUBMISSION_ARTIFACT_ROOT"); root != "" {
+		abs, err := filepath.Abs(root)
+		if err == nil {
+			return abs
+		}
+		return root
+	}
+	return filepath.Join(repoRoot, ".artifacts", "submissions")
 }
 
 func prepareBuildContext(src string, dst string, language string) error {
