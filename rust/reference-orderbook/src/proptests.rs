@@ -80,11 +80,7 @@ where
                     Ok(fills) => {
                         // If fully matched, the id never rests, so it can be
                         // reused later.
-                        let remaining_on_book = fills
-                            .iter()
-                            .map(|f| f.qty)
-                            .sum::<i64>()
-                            < *qty;
+                        let remaining_on_book = fills.iter().map(|f| f.qty).sum::<i64>() < *qty;
                         if !remaining_on_book {
                             live.remove(id);
                         }

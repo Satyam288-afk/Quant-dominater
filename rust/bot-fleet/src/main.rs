@@ -262,6 +262,7 @@ async fn main() -> Result<()> {
         let mut pool =
             pool::ConnectionPool::connect(&args.target, n_conns, args.bots, pod_offset).await?;
         reconnects_handle = Some(pool.reconnects_handle());
+        let wire_sent = pool.wire_sent_handle();
         for bot_index in 0..args.bots {
             let config = BotConfig {
                 global_bot_index: pod_offset + bot_index,
@@ -284,6 +285,7 @@ async fn main() -> Result<()> {
                 config,
                 sender,
                 inbox,
+                Arc::clone(&wire_sent),
                 event_tx.clone(),
                 output_tx.clone(),
                 Arc::clone(&sink),
@@ -499,8 +501,9 @@ async fn run_bot(
 #[allow(clippy::too_many_arguments)]
 async fn run_bot_pooled(
     config: BotConfig,
-    sender: mpsc::Sender<String>,
-    mut inbox: mpsc::UnboundedReceiver<Value>,
+    sender: mpsc::Sender<(String, String)>,
+    mut inbox: mpsc::UnboundedReceiver<(Instant, Value)>,
+    wire_sent: Arc<std::sync::Mutex<HashMap<String, Instant>>>,
     event_tx: mpsc::UnboundedSender<Value>,
     output_tx: mpsc::UnboundedSender<Value>,
     sink: Arc<dyn TelemetrySink>,
@@ -524,10 +527,12 @@ async fn run_bot_pooled(
             _ = ticker.tick(), if Instant::now() < deadline => {
                 seq_no += 1;
                 let prepared = build_send(&config, &bot_id, seq_no, &sent_orders);
-                if sender.send(prepared.text).await.is_err() {
+                if sender.send((prepared.track_id.clone(), prepared.text)).await.is_err() {
                     // Pool writer closed — bail.
                     break;
                 }
+                // Fallback stamp only: the authoritative send stamp is taken by
+                // the pool supervisor at the wire (after write.send).
                 pending.insert(prepared.track_id.clone(), Instant::now());
                 stats.orders_sent += 1;
                 if config.cancel_per_mille > 0 && prepared.is_new {
@@ -551,11 +556,13 @@ async fn run_bot_pooled(
             }
             maybe_msg = inbox.recv(), if Instant::now() < drain_deadline => {
                 match maybe_msg {
-                    Some(message) => {
+                    Some((recv_instant, message)) => {
                         handle_engine_value(
                             &config.run_id,
                             &bot_id,
+                            recv_instant,
                             message,
+                            &wire_sent,
                             &mut pending,
                             &mut stats,
                             &output_tx,
@@ -581,7 +588,9 @@ async fn run_bot_pooled(
 async fn handle_engine_value(
     run_id: &str,
     bot_id: &str,
+    recv_instant: Instant,
     message: Value,
+    wire_sent: &Arc<std::sync::Mutex<HashMap<String, Instant>>>,
     pending: &mut HashMap<String, Instant>,
     stats: &mut BotStats,
     output_tx: &mpsc::UnboundedSender<Value>,
@@ -599,9 +608,16 @@ async fn handle_engine_value(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let latency_ns = pending
-                .remove(&client_order_id)
-                .map(|sent| sent.elapsed().as_nanos() as u64)
+            // Wire-adjacent latency: the supervisor stamped send right after
+            // write.send, the reader stamped recv right after read.next() —
+            // fleet-internal channel hops are excluded from the measurement.
+            // Fall back to the bot-side stamp only if the wire stamp is
+            // missing (e.g. ack raced the supervisor's insert).
+            let wire = wire_sent.lock().unwrap().remove(&client_order_id);
+            let bot_side = pending.remove(&client_order_id);
+            let latency_ns = wire
+                .map(|sent| recv_instant.saturating_duration_since(sent).as_nanos() as u64)
+                .or_else(|| bot_side.map(|sent| sent.elapsed().as_nanos() as u64))
                 .unwrap_or_default();
             stats.acks_received += 1;
             stats.ack_recv_ts_ns.push(recv_ts_ns);

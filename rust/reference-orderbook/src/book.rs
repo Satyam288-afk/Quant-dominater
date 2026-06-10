@@ -289,10 +289,12 @@ mod tests {
     #[test]
     fn cancel_then_reinsert_works() {
         let mut book = OrderBook::new();
-        book.process_new_order(limit("a", Side::Buy, 100, 5, 1)).unwrap();
+        book.process_new_order(limit("a", Side::Buy, 100, 5, 1))
+            .unwrap();
         assert!(book.cancel("a"));
         // Reinsert same id at a different price.
-        book.process_new_order(limit("a", Side::Buy, 110, 5, 2)).unwrap();
+        book.process_new_order(limit("a", Side::Buy, 110, 5, 2))
+            .unwrap();
         let fills = book
             .process_new_order(limit("s", Side::Sell, 100, 5, 3))
             .unwrap();

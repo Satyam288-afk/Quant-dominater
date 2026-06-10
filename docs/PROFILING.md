@@ -183,12 +183,13 @@ safe, and measurable. The rest were rejected with reasons, which is the point:
   hot serving binary, but the Rust here is the *load generator* (itself
   network-bound) and two batch tools; the verified impact on the judged workload
   was negligible, so it wasn't worth the build-time cost.
-- **Sorted-insert instead of `sortBook`'s full re-sort per insert** — genuine
-  O(n·log n)→O(n) algebra, but the realized payoff is conditioned on *deep* books,
-  and the realistic 16-symbol + heavy-cancel workload keeps books shallow, so the
-  sort is already cheap. Worse, it touches matching-order correctness — the
-  price-time-proof and the `broken-price-time-priority` test vector — for a gain
-  the network ceiling swallows. **Deliberately not done.**
+- **Sorted-insert instead of `sortBook`'s full re-sort per insert** — rejected in
+  this round on the "books stay shallow" assumption. *Round 2 (below) refuted the
+  rejection*: controlled-depth benchmarks plus an e2e A/B at 60k orders/s showed
+  the re-sort collapsing the tail (p99.9 up to 43ms), and a differential test
+  proved the binary insert order-identical in both engine modes. Now done — an
+  honest record that the discipline cuts both ways: rejections are hypotheses
+  too, and a deeper measurement can overturn them.
 - **Wire protocol (binary framing / `simd-json` / write-batching)** — batching
   trades p99 for throughput, directly against the `TCP_NODELAY` latency fix, and
   pushes complexity onto the contestant. Not worth it.
@@ -223,6 +224,76 @@ workload: the books are shallow, the matcher is off the critical path, and any
 nanoseconds saved in the engine are swamped by socket + serialization time on the
 wire. If more margin were wanted it lives in *transport*, not the matcher — and
 knowing that, and stopping, is itself the result.
+
+## Round 2 — profile the instrument, not just the engine
+
+A second sweep ran six profilers in parallel — live `sample(1)` on a real run,
+Go CPU/alloc pprof with **controlled book depth**, Rust microbenches of the
+fleet's send/recv path, a wire-path audit on both sides, ingester throughput,
+GC A/B — then **re-measured every candidate sequentially and adversarially**
+(an unloaded box; a finding survives only if an independent skeptic reproduces
+its numbers AND it can plausibly move end-to-end p99). The headline:
+
+**At every load tested, the largest contributors to the *reported* p99/TPS were
+in the benchmark harness, not the matching engine.** The baseline sample showed
+the engine >99% idle at canonical load — the tail lived in the measuring
+instrument:
+
+1. **FileSink convoy (`bench-core/telemetry/sink_file.rs`)** — every bot
+   `await`ed a global `Mutex<tokio::fs::File>` + unbuffered write *inside the
+   latency-measuring loop*, 2+ emits per order. Measured ~7.9µs per emit →
+   135ns after decoupling to a writer task + 64KiB `BufWriter`. E2E: healthy
+   p99 11.3→5.9ms (lands at the `backend=none` floor); at saturation **26.7k →
+   50.1k TPS, ~50k timeouts → 0, p99 3.5s → 5-6ms**. Telemetry completeness
+   verified line-for-line.
+2. **KafkaSink delivery-await (`sink_kafka.rs`)** — the live backend awaited
+   each rdkafka delivery report inline with `linger.ms=5`: a measured ~5.9ms
+   hard floor per emit, capping a bot at ~84 orders/s. Now enqueues via
+   `send_result` and consumes reports out-of-band in batches; `flush()` stays
+   the durability barrier.
+3. **Stamp placement (`bot-fleet/pool.rs`)** — pooled mode stamped *send*
+   before the outbound channel hop and *recv* after parse+clone+inbox hop, so
+   the fleet billed its own plumbing to the engine. Stamps now sit at the wire
+   (supervisor after `write.send`, reader right after `read.next()`): reported
+   p50 −0.55ms, p99 −0.65 to −1.17ms, reaching direct-socket parity. Pooled
+   numbers before/after this change are not comparable — by design.
+4. **Engine: `sortBook` → binary-search insert (both engines)** — the full
+   both-sides stable re-sort per resting insert was 46-48% of matching CPU.
+   Upper-bound binary insert + one memmove is order-identical (differential
+   test over 20k ops × both modes, pinned in `insertsorted_test.go`) and ~8.5×
+   faster per resting order; at 60k/s it is the difference between tail
+   collapse (0.3-22ms, p99.9 43ms) and a tight 105-137µs. Cancels moved from a
+   linear ID scan (`runtime.memequal` ~26% of profile) to O(log n) positional
+   removal with pointer-identity verification.
+5. **Demo default: `--engine disruptor`** — at the exact canonical load the
+   lock-free engine measured p50/p99 0.48/2.00ms vs mutex 1.52/4.95ms. The
+   demos now default to it (`STUB_ENGINE=mutex` flips back); cost is ~55% of
+   one core of idle backoff-timer churn, fine on a bench host.
+6. **Ingester dedup 2.7×** — the idempotency gate paid SipHash twice (identity
+   hash + the `HashSet`'s own). ahash identity + a pass-through hasher on the
+   already-uniform u64 keys: 10.6 → 29.0 Mevents/s, full-field identity
+   semantics unchanged. (Either half alone yields only ~1.4× — measured.)
+7. **Audit log honesty** — the engine's `--events` JSONL silently lost *all*
+   buffered entries on SIGTERM (0-line files while the writer actively
+   encoded). The engine now drains and flushes on shutdown, flushes every
+   500ms, and the WS loop guards the per-message boxing behind the nil-logger
+   check.
+
+Equally important, **what the verifiers killed** (each with a reproduced
+measurement): GOGC/GOMEMLIMIT tuning (GC STW touches ~0.1% of ops — between
+p99.9 and p99.99), marshal-once fill fanout (212ns saved vs a 72µs RTT, e2e
+flat), gorilla `PreparedMessage` (~5.8µs of setup per message at fanout=2),
+`simd-json` (loses to `serde_json` on 213B flat objects on Apple Silicon),
+widening the WS pool (pool64 measured *worse* than pool8), wire-key compaction
+(every message already fits one TCP segment with NODELAY), and parking the
+disruptor's idle matchers (the known regression — the idle cost is timer
+churn, not the spin).
+
+The Round-1 floor statement said the remaining margin lived "in transport, not
+the matcher". Round 2 sharpened it: most of that margin lived **in the
+harness's own bookkeeping on the measurement path** — and a benchmarking
+platform that finds and fixes its own instrument error is worth more than one
+that optimizes its engine into the noise.
 
 ## Reproduce it
 

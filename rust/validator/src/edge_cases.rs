@@ -45,7 +45,9 @@ pub fn detect(
     // means the engine emitted an inconsistent execution report. Only flag that.
     let mut by_seq: HashMap<u64, &Fill> = HashMap::new();
     for entry in raw_actual {
-        let Some(seq) = entry.engine_seq else { continue };
+        let Some(seq) = entry.engine_seq else {
+            continue;
+        };
         match by_seq.get(&seq) {
             Some(prev)
                 if prev.buy_order_id != entry.fill.buy_order_id

@@ -8,6 +8,7 @@ name = "telemetry-ingester"
 path = "src/main.rs"
 
 [dependencies]
+ahash = "0.8"
 anyhow = "1"
 bench-core = { path = "../bench-core", features = ["hdr"] }
 clap = { version = "4", features = ["derive", "env"] }

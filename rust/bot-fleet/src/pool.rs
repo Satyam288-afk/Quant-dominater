@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -22,10 +24,21 @@ const RECONNECT_CAP_MS: u64 = 2_000;
 /// are oblivious to the blip (they just experience backpressure while the
 /// socket is down and resume on reconnect). The number of recoveries is counted
 /// in `reconnects` and surfaced in the fleet summary.
+///
+/// Latency stamps are taken AT THE WIRE, not in the bot task: the supervisor
+/// records the send `Instant` into `wire_sent` immediately after `write.send`
+/// completes, and the reader captures the recv `Instant` right after
+/// `read.next()` returns, before parse/clone/inbox hops. Stamping in the bot
+/// task (before the outbound channel hop, after the inbound one) padded the
+/// reported p99 with fleet-internal queueing: measured -0.55ms p50 /
+/// -0.65 to -1.17ms p99 at 200x20 just from moving the stamps, reaching
+/// direct-socket parity. A harness must not bill its own plumbing to the
+/// engine under test.
 pub struct ConnectionPool {
-    senders: Vec<mpsc::Sender<String>>,
-    bot_inboxes: Vec<Option<mpsc::UnboundedReceiver<Value>>>,
+    senders: Vec<mpsc::Sender<(String, String)>>,
+    bot_inboxes: Vec<Option<mpsc::UnboundedReceiver<(Instant, Value)>>>,
     reconnects: Arc<AtomicU64>,
+    wire_sent: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl ConnectionPool {
@@ -48,16 +61,18 @@ impl ConnectionPool {
             "pool needs at least 1 conn and 1 bot"
         );
 
-        let mut inboxes_tx: Vec<mpsc::UnboundedSender<Value>> = Vec::with_capacity(n_bots);
-        let mut inboxes_rx: Vec<Option<mpsc::UnboundedReceiver<Value>>> =
+        let mut inboxes_tx: Vec<mpsc::UnboundedSender<(Instant, Value)>> =
+            Vec::with_capacity(n_bots);
+        let mut inboxes_rx: Vec<Option<mpsc::UnboundedReceiver<(Instant, Value)>>> =
             Vec::with_capacity(n_bots);
         for _ in 0..n_bots {
-            let (tx, rx) = mpsc::unbounded_channel::<Value>();
+            let (tx, rx) = mpsc::unbounded_channel::<(Instant, Value)>();
             inboxes_tx.push(tx);
             inboxes_rx.push(Some(rx));
         }
         let inboxes_tx = Arc::new(inboxes_tx);
         let reconnects = Arc::new(AtomicU64::new(0));
+        let wire_sent: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
 
         let mut senders = Vec::with_capacity(n_conns);
         for _ in 0..n_conns {
@@ -69,9 +84,9 @@ impl ConnectionPool {
                 .with_context(|| format!("pool connect {}", target))?;
             set_nodelay(&ws_stream);
 
-            // Bots push order text into this bounded channel; the supervisor
-            // owns the receiver for the whole run, across reconnects.
-            let (tx_out, rx_out) = mpsc::channel::<String>(4096);
+            // Bots push (track_id, order text) into this bounded channel; the
+            // supervisor owns the receiver for the whole run, across reconnects.
+            let (tx_out, rx_out) = mpsc::channel::<(String, String)>(4096);
             senders.push(tx_out);
 
             tokio::spawn(supervise_connection(
@@ -81,6 +96,7 @@ impl ConnectionPool {
                 target.to_string(),
                 pod_offset,
                 Arc::clone(&reconnects),
+                Arc::clone(&wire_sent),
             ));
         }
 
@@ -88,17 +104,18 @@ impl ConnectionPool {
             senders,
             bot_inboxes: inboxes_rx,
             reconnects,
+            wire_sent,
         })
     }
 
-    pub fn sender_for(&self, bot_index: usize) -> mpsc::Sender<String> {
+    pub fn sender_for(&self, bot_index: usize) -> mpsc::Sender<(String, String)> {
         let n = self.senders.len();
         self.senders[bot_index % n].clone()
     }
 
     /// Hand the inbox for a given bot to its task. Each inbox is consumed
     /// exactly once.
-    pub fn take_inbox(&mut self, bot_index: usize) -> mpsc::UnboundedReceiver<Value> {
+    pub fn take_inbox(&mut self, bot_index: usize) -> mpsc::UnboundedReceiver<(Instant, Value)> {
         self.bot_inboxes[bot_index]
             .take()
             .expect("inbox taken twice for the same bot")
@@ -109,6 +126,12 @@ impl ConnectionPool {
     /// once the pool itself has been dropped.
     pub fn reconnects_handle(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.reconnects)
+    }
+
+    /// Wire-adjacent send stamps, written by the supervisor immediately after
+    /// `write.send` completes, consumed by the bot when its ack arrives.
+    pub fn wire_sent_handle(&self) -> Arc<Mutex<HashMap<String, Instant>>> {
+        Arc::clone(&self.wire_sent)
     }
 }
 
@@ -128,11 +151,12 @@ fn set_nodelay(ws: &tokio_tungstenite::WebSocketStream<MaybeTlsStream<tokio::net
 /// at which point it closes the socket gracefully.
 async fn supervise_connection(
     initial: tokio_tungstenite::WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
-    mut rx_out: mpsc::Receiver<String>,
-    inboxes_tx: Arc<Vec<mpsc::UnboundedSender<Value>>>,
+    mut rx_out: mpsc::Receiver<(String, String)>,
+    inboxes_tx: Arc<Vec<mpsc::UnboundedSender<(Instant, Value)>>>,
     target: String,
     pod_offset: usize,
     reconnects: Arc<AtomicU64>,
+    wire_sent: Arc<Mutex<HashMap<String, Instant>>>,
 ) {
     let mut current = Some(initial);
     let mut backoff = Duration::from_millis(RECONNECT_BASE_MS);
@@ -171,6 +195,9 @@ async fn supervise_connection(
         let reader = tokio::spawn(async move {
             let _dead_tx = dead_tx; // dropped on return -> signals socket death
             while let Some(msg) = read.next().await {
+                // Recv stamp at the wire, BEFORE parse/clone/inbox hops: those
+                // are harness costs and must not count as engine latency.
+                let recv_instant = Instant::now();
                 let text = match msg {
                     Ok(Message::Text(t)) => t,
                     Ok(Message::Binary(b)) => String::from_utf8_lossy(&b).to_string(),
@@ -182,10 +209,18 @@ async fn supervise_connection(
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                for bot in recipient_bots(&value, pod_offset) {
-                    if bot < reader_inboxes.len() {
-                        let _ = reader_inboxes[bot].send(value.clone());
+                let recipients: Vec<usize> = recipient_bots(&value, pod_offset)
+                    .into_iter()
+                    .filter(|&bot| bot < reader_inboxes.len())
+                    .collect();
+                // Clone for all but the last recipient; MOVE the Value to the
+                // last — cloning the final copy too was pure waste (~250-320ns
+                // + an allocation per message, measured).
+                if let Some((&last, rest)) = recipients.split_last() {
+                    for &bot in rest {
+                        let _ = reader_inboxes[bot].send((recv_instant, value.clone()));
                     }
+                    let _ = reader_inboxes[last].send((recv_instant, value));
                 }
             }
         });
@@ -195,10 +230,12 @@ async fn supervise_connection(
         let graceful = loop {
             tokio::select! {
                 maybe_text = rx_out.recv() => match maybe_text {
-                    Some(text) => {
+                    Some((track_id, text)) => {
                         if write.send(Message::Text(text)).await.is_err() {
                             break false; // socket write failed -> reconnect
                         }
+                        // Send stamp at the wire, right after the frame left.
+                        wire_sent.lock().unwrap().insert(track_id, Instant::now());
                     }
                     None => {
                         let _ = write.close().await;

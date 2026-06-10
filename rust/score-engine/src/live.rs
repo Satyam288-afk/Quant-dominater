@@ -209,9 +209,7 @@ pub async fn publish_leaderboard(redis_url: &str, team_id: &str, score: &ScoreJs
     // Always reflect the latest run's score for the team in the global
     // leaderboard. Teams who beat their previous score climb naturally
     // since ZADD overwrites.
-    let _: () = mgr
-        .zadd("leaderboard:global", team_id, score.score)
-        .await?;
+    let _: () = mgr.zadd("leaderboard:global", team_id, score.score).await?;
 
     // Track the team's best score separately so a regression run doesn't
     // demote them on the "personal best" view.
@@ -272,7 +270,10 @@ pub async fn publish_leaderboard(redis_url: &str, team_id: &str, score: &ScoreJs
         .arg("failure_reason")
         .arg(score.failure_reason.clone().unwrap_or_default())
         .ignore();
-    pipe.cmd("SADD").arg("leaderboard:teams").arg(team_id).ignore();
+    pipe.cmd("SADD")
+        .arg("leaderboard:teams")
+        .arg(team_id)
+        .ignore();
     let _: redis::RedisResult<()> = pipe.query_async(&mut mgr).await;
 
     Ok(())

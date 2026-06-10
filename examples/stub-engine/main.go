@@ -2,17 +2,20 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"flag"
 	"log"
 	"net/http"
 	_ "net/http/pprof" // registers /debug/pprof handlers on DefaultServeMux
 	"os"
+	"os/signal"
 	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -122,12 +125,12 @@ type FillDelivery struct {
 // assigning each order's monotonic `engineSeq` *under the target book's lock*,
 // so within a symbol the engine_seq order equals the processing order (the
 // validator replays per symbol in engine_seq order). A global `index`
-// (orderID→symbol) routes cancels to the right book without a global lock.
+// (orderID→*Order) routes cancels to the right book without a global lock.
 type Engine struct {
 	engineSeq atomic.Uint64
 	booksMu   sync.RWMutex // guards the books map (creation), not the matching
 	books     map[string]*Book
-	index     sync.Map // orderID(string) -> symbol(string), for resting orders
+	index     sync.Map // orderID(string) -> *Order (resting); Symbol routes the cancel
 	mode      string
 }
 
@@ -195,19 +198,18 @@ func (e *Engine) ProcessNew(in NewOrder, owner *Client) (Ack, []FillDelivery) {
 	}
 
 	var deliveries []FillDelivery
+	broken := e.mode == "broken-price-time-priority"
 	if side == "BUY" {
 		deliveries = e.matchBuy(book, active, orderType == "MARKET")
 		if active.Qty > 0 && orderType != "MARKET" {
-			book.buys = append(book.buys, active)
-			e.sortBook(book)
-			e.index.Store(active.ID, symbol)
+			insertSorted(&book.buys, active, true, broken)
+			e.index.Store(active.ID, active)
 		}
 	} else {
 		deliveries = e.matchSell(book, active, orderType == "MARKET")
 		if active.Qty > 0 && orderType != "MARKET" {
-			book.sells = append(book.sells, active)
-			e.sortBook(book)
-			e.index.Store(active.ID, symbol)
+			insertSorted(&book.sells, active, false, broken)
+			e.index.Store(active.ID, active)
 		}
 	}
 
@@ -215,7 +217,7 @@ func (e *Engine) ProcessNew(in NewOrder, owner *Client) (Ack, []FillDelivery) {
 }
 
 func (e *Engine) ProcessCancel(in CancelOrder) Ack {
-	symVal, ok := e.index.Load(in.OrigClientOrderID)
+	v, ok := e.index.Load(in.OrigClientOrderID)
 	if !ok {
 		// Not resting (never rested, or already filled/cancelled): a no-op
 		// cancel, sequenced by the atomic counter — its position can't affect
@@ -228,14 +230,16 @@ func (e *Engine) ProcessCancel(in CancelOrder) Ack {
 			TsNs:          nowNs(),
 		}
 	}
+	ord := v.(*Order)
 
-	book := e.bookFor(symVal.(string))
+	book := e.bookFor(ord.Symbol)
 	book.mu.Lock()
 	defer book.mu.Unlock()
 
 	// Seq under the book lock so the cancel is ordered consistently with this
 	// symbol's matches. Re-check membership under the lock: the order may have
-	// filled (lower seq) between the Load above and acquiring the lock.
+	// filled (lower seq) between the Load above and acquiring the lock — the
+	// pointer-identity check at the binary-searched position handles that.
 	ack := Ack{
 		Type:          "ack",
 		ClientOrderID: in.ClientOrderID,
@@ -243,27 +247,75 @@ func (e *Engine) ProcessCancel(in CancelOrder) Ack {
 		EngineSeq:     e.nextSeq(),
 		TsNs:          nowNs(),
 	}
-	if removeResting(book, in.OrigClientOrderID) {
+	if removeOrder(book, ord, e.mode == "broken-price-time-priority") {
 		ack.Status = "canceled"
 		e.index.Delete(in.OrigClientOrderID)
 	}
 	return ack
 }
 
-func removeResting(book *Book, id string) bool {
-	for i, order := range book.buys {
-		if order.ID == id {
-			book.buys = append(book.buys[:i], book.buys[i+1:]...)
-			return true
+// orderBefore reports whether a sorts strictly before b on the given side.
+// (Price, TsNs, InsertSeq) is a strict total order because InsertSeq is unique
+// per book — semantics identical to the old sortBook comparators, including
+// the deliberate broken-price-time-priority inversion the validator must be
+// able to catch.
+func orderBefore(a, b *Order, buySide, broken bool) bool {
+	if a.Price != b.Price {
+		if buySide {
+			return a.Price > b.Price
 		}
+		return a.Price < b.Price
 	}
-	for i, order := range book.sells {
-		if order.ID == id {
-			book.sells = append(book.sells[:i], book.sells[i+1:]...)
-			return true
+	if a.TsNs != b.TsNs {
+		if broken {
+			return a.TsNs > b.TsNs
 		}
+		return a.TsNs < b.TsNs
 	}
-	return false
+	return a.InsertSeq < b.InsertSeq
+}
+
+// insertSorted replaces the old append + sort.SliceStable of BOTH sides per
+// resting insert (profiled at ~47% of matching CPU). The book is always
+// sorted, and a stable sort of "sorted slice + one appended element" is
+// exactly an upper-bound insert: O(log n) compares + one memmove, zero
+// allocations. Equivalence is enforced by TestInsertSortedEquivalence.
+func insertSorted(side *[]*Order, o *Order, buySide, broken bool) {
+	s := *side
+	i := sort.Search(len(s), func(i int) bool {
+		return orderBefore(o, s[i], buySide, broken)
+	})
+	s = append(s, nil)
+	copy(s[i+1:], s[i:])
+	s[i] = o
+	*side = s
+}
+
+// removeOrder binary-searches the order's exact ladder position (the
+// comparator fields Price/TsNs/InsertSeq are immutable after insert), verifies
+// by pointer identity, and removes with one memmove. Replaces a linear ID scan
+// of both sides (runtime.memequal was 26% of the cancel-path profile). A
+// pointer mismatch at the computed position means the order is no longer
+// resting (filled or already cancelled) — exactly the not_found semantics.
+func removeOrder(book *Book, ord *Order, broken bool) bool {
+	buySide := ord.Side == "BUY"
+	s := book.sells
+	if buySide {
+		s = book.buys
+	}
+	i := sort.Search(len(s), func(i int) bool {
+		return !orderBefore(s[i], ord, buySide, broken)
+	})
+	if i >= len(s) || s[i] != ord {
+		return false
+	}
+	s = append(s[:i], s[i+1:]...)
+	if buySide {
+		book.buys = s
+	} else {
+		book.sells = s
+	}
+	return true
 }
 
 func (e *Engine) bookFor(symbol string) *Book {
@@ -349,35 +401,6 @@ func (e *Engine) matchSell(book *Book, active *Order, market bool) []FillDeliver
 	return deliveries
 }
 
-func (e *Engine) sortBook(book *Book) {
-	sort.SliceStable(book.buys, func(i, j int) bool {
-		a, b := book.buys[i], book.buys[j]
-		if a.Price != b.Price {
-			return a.Price > b.Price
-		}
-		if a.TsNs != b.TsNs {
-			if e.mode == "broken-price-time-priority" {
-				return a.TsNs > b.TsNs
-			}
-			return a.TsNs < b.TsNs
-		}
-		return a.InsertSeq < b.InsertSeq
-	})
-	sort.SliceStable(book.sells, func(i, j int) bool {
-		a, b := book.sells[i], book.sells[j]
-		if a.Price != b.Price {
-			return a.Price < b.Price
-		}
-		if a.TsNs != b.TsNs {
-			if e.mode == "broken-price-time-priority" {
-				return a.TsNs > b.TsNs
-			}
-			return a.TsNs < b.TsNs
-		}
-		return a.InsertSeq < b.InsertSeq
-	})
-}
-
 type Client struct {
 	conn *websocket.Conn
 	mu   sync.Mutex
@@ -399,6 +422,8 @@ func (c *Client) SendJSON(v any) error {
 // authoritative record is the bot fleet's own events.jsonl.
 type JSONLLogger struct {
 	ch      chan any
+	quit    chan struct{}
+	done    chan struct{}
 	dropped atomic.Uint64
 }
 
@@ -407,15 +432,40 @@ func NewJSONLLogger(path string) (*JSONLLogger, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &JSONLLogger{ch: make(chan any, 1<<16)}
+	l := &JSONLLogger{
+		ch:   make(chan any, 1<<16),
+		quit: make(chan struct{}),
+		done: make(chan struct{}),
+	}
 	go func() {
+		defer close(l.done)
 		w := bufio.NewWriterSize(f, 1<<20)
 		enc := json.NewEncoder(w)
-		for v := range l.ch {
-			_ = enc.Encode(v)
+		// Periodic flush bounds the loss window on an unclean exit to ~500ms:
+		// before this, the 1MB buffer flushed only when full or on graceful
+		// close, so a SIGTERM-ed run left a 0-line audit file.
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case v := <-l.ch:
+				_ = enc.Encode(v)
+			case <-ticker.C:
+				_ = w.Flush()
+			case <-l.quit:
+				// Drain whatever is already queued, then flush and close.
+				for {
+					select {
+					case v := <-l.ch:
+						_ = enc.Encode(v)
+					default:
+						_ = w.Flush()
+						_ = f.Close()
+						return
+					}
+				}
+			}
 		}
-		_ = w.Flush()
-		_ = f.Close()
 	}()
 	return l, nil
 }
@@ -429,6 +479,17 @@ func (l *JSONLLogger) Write(v any) {
 	default:
 		l.dropped.Add(1)
 	}
+}
+
+// Close drains queued entries, flushes the buffer and closes the file. Safe on
+// a nil logger and safe against concurrent Write (the entry channel is never
+// closed; late writes are simply never drained).
+func (l *JSONLLogger) Close() {
+	if l == nil {
+		return
+	}
+	close(l.quit)
+	<-l.done
 }
 
 type Server struct {
@@ -503,7 +564,11 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return
 		}
-		s.logMsg("in", "ws", json.RawMessage(raw))
+		// Guard BEFORE boxing: json.RawMessage(raw) into `any` is an
+		// allocation per inbound message that --events "" runs must not pay.
+		if s.logger != nil {
+			s.logMsg("in", "ws", json.RawMessage(raw))
+		}
 
 		// Single decode + dispatch on Type (no second full re-parse).
 		var in Inbound
@@ -556,14 +621,24 @@ func (s *Server) sendFill(delivery FillDelivery) {
 	}
 }
 
-// logMsg records an audit entry only when audit logging is enabled. Building the
-// map is itself an allocation on the hot path, so the nil check lets a perf run
-// (`--events ""`) skip it entirely.
+// auditEntry is the audit-log record. A typed struct instead of the old
+// map[string]any: the map cost an allocation + four hashed inserts per logged
+// message on the hot path (A/B with audit on: p99 2.9us -> 6.1us was largely
+// this); the struct is one boxed value into the logger channel.
+type auditEntry struct {
+	Direction string `json:"direction"`
+	Transport string `json:"transport"`
+	TsNs      uint64 `json:"ts_ns"`
+	Message   any    `json:"message"`
+}
+
+// logMsg records an audit entry only when audit logging is enabled. The nil
+// check lets a perf run (`--events ""`) skip the entry construction entirely.
 func (s *Server) logMsg(direction, transport string, msg any) {
 	if s.logger == nil {
 		return
 	}
-	s.logger.Write(map[string]any{"direction": direction, "transport": transport, "ts_ns": nowNs(), "message": msg})
+	s.logger.Write(auditEntry{Direction: direction, Transport: transport, TsNs: nowNs(), Message: msg})
 }
 
 func (s *Server) sendToClient(client *Client, msg any) {
@@ -692,6 +767,28 @@ func main() {
 	mux.HandleFunc("/orders", server.orders)
 	mux.HandleFunc("/ws", server.ws)
 
-	log.Printf("stub engine listening on %s mode=%s engine=%s", *addr, *mode, *engineKind)
-	log.Fatal(http.ListenAndServe(*addr, mux))
+	srv := &http.Server{Addr: *addr, Handler: mux}
+	go func() {
+		log.Printf("stub engine listening on %s mode=%s engine=%s", *addr, *mode, *engineKind)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+
+	// Graceful shutdown: stop the listener, then flush the audit log. Without
+	// this, a SIGTERM-ed run silently lost the entire buffered JSONL audit.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	<-ctx.Done()
+	log.Printf("stub engine: shutdown signal; draining")
+	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(shutCtx)
+	logger.Close()
+	log.Printf("stub engine: audit log flushed (dropped=%d); bye", func() uint64 {
+		if logger == nil {
+			return 0
+		}
+		return logger.dropped.Load()
+	}())
 }

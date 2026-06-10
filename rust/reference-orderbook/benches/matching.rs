@@ -48,7 +48,8 @@ fn bench_matching(c: &mut Criterion) {
         b.iter_batched(
             loaded_book,
             |mut book| {
-                let _ = black_box(book.process_new_order(order("rest", Side::Buy, 90, 5, 1_000_000)));
+                let _ =
+                    black_box(book.process_new_order(order("rest", Side::Buy, 90, 5, 1_000_000)));
             },
             BatchSize::SmallInput,
         )
@@ -59,7 +60,8 @@ fn bench_matching(c: &mut Criterion) {
         b.iter_batched(
             loaded_book,
             |mut book| {
-                let _ = black_box(book.process_new_order(order("agg", Side::Sell, 90, 60, 1_000_000)));
+                let _ =
+                    black_box(book.process_new_order(order("agg", Side::Sell, 90, 60, 1_000_000)));
             },
             BatchSize::SmallInput,
         )

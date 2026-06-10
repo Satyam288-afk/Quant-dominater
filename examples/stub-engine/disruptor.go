@@ -14,7 +14,6 @@ package main
 import (
 	"hash/fnv"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -118,7 +117,7 @@ type dShard struct {
 type DisruptorEngine struct {
 	shards    []*dShard
 	engineSeq atomic.Uint64
-	index     sync.Map // orderID(string) -> symbol(string), for cancel routing
+	index     sync.Map // orderID(string) -> *Order (resting); Symbol routes the cancel to its shard
 	mode      string
 	out       chan outMsg
 }
@@ -173,7 +172,7 @@ func (de *DisruptorEngine) SubmitNew(o NewOrder, client *Client) {
 
 func (de *DisruptorEngine) SubmitCancel(c CancelOrder, client *Client) {
 	if v, ok := de.index.Load(c.OrigClientOrderID); ok {
-		symbol := v.(string)
+		symbol := v.(*Order).Symbol
 		de.shardFor(symbol).ring.publish(orderReq{kind: reqCancel, cancel: c, symbol: symbol, client: client})
 		return
 	}
@@ -253,19 +252,18 @@ func (de *DisruptorEngine) processNew(sh *dShard, in NewOrder, owner *Client) (A
 	active := &Order{ID: in.ClientOrderID, Symbol: symbol, Side: side, Price: in.Price, Qty: in.Qty, TsNs: in.TsNs, InsertSeq: book.insertSeq, Owner: owner}
 
 	var deliveries []FillDelivery
+	broken := de.mode == "broken-price-time-priority"
 	if side == "BUY" {
 		deliveries = de.matchBuy(book, active, orderType == "MARKET")
 		if active.Qty > 0 && orderType != "MARKET" {
-			book.buys = append(book.buys, active)
-			de.sortBook(book)
-			de.index.Store(active.ID, symbol)
+			insertSorted(&book.buys, active, true, broken)
+			de.index.Store(active.ID, active)
 		}
 	} else {
 		deliveries = de.matchSell(book, active, orderType == "MARKET")
 		if active.Qty > 0 && orderType != "MARKET" {
-			book.sells = append(book.sells, active)
-			de.sortBook(book)
-			de.index.Store(active.ID, symbol)
+			insertSorted(&book.sells, active, false, broken)
+			de.index.Store(active.ID, active)
 		}
 	}
 	return ack, deliveries
@@ -273,9 +271,15 @@ func (de *DisruptorEngine) processNew(sh *dShard, in NewOrder, owner *Client) (A
 
 func (de *DisruptorEngine) processCancel(sh *dShard, symbol string, in CancelOrder) Ack {
 	ack := Ack{Type: "ack", ClientOrderID: in.ClientOrderID, Status: "not_found", EngineSeq: de.nextSeq(), TsNs: nowNs()}
-	if book := sh.books[symbol]; book != nil && removeResting(book, in.OrigClientOrderID) {
-		ack.Status = "canceled"
-		de.index.Delete(in.OrigClientOrderID)
+	// Re-load under the matcher: the order may have filled between the
+	// producer's routing Load and this point; the pointer-identity check in
+	// removeOrder turns that race into a clean not_found.
+	if v, ok := de.index.Load(in.OrigClientOrderID); ok {
+		ord := v.(*Order)
+		if book := sh.books[symbol]; book != nil && removeOrder(book, ord, de.mode == "broken-price-time-priority") {
+			ack.Status = "canceled"
+			de.index.Delete(in.OrigClientOrderID)
+		}
 	}
 	return ack
 }
@@ -324,34 +328,4 @@ func (de *DisruptorEngine) matchSell(book *Book, active *Order, market bool) []F
 		}
 	}
 	return deliveries
-}
-
-func (de *DisruptorEngine) sortBook(book *Book) {
-	broken := de.mode == "broken-price-time-priority"
-	sort.SliceStable(book.buys, func(i, j int) bool {
-		a, b := book.buys[i], book.buys[j]
-		if a.Price != b.Price {
-			return a.Price > b.Price
-		}
-		if a.TsNs != b.TsNs {
-			if broken {
-				return a.TsNs > b.TsNs
-			}
-			return a.TsNs < b.TsNs
-		}
-		return a.InsertSeq < b.InsertSeq
-	})
-	sort.SliceStable(book.sells, func(i, j int) bool {
-		a, b := book.sells[i], book.sells[j]
-		if a.Price != b.Price {
-			return a.Price < b.Price
-		}
-		if a.TsNs != b.TsNs {
-			if broken {
-				return a.TsNs > b.TsNs
-			}
-			return a.TsNs < b.TsNs
-		}
-		return a.InsertSeq < b.InsertSeq
-	})
 }

@@ -17,7 +17,6 @@ pub enum OrderType {
     Market,
 }
 
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NewOrder {
     #[serde(default, rename = "type")]

@@ -87,7 +87,8 @@ pub fn compose(inputs: ScoreInputs) -> CompositeScore {
     let throughput = throughput_score(inputs.tps, inputs.expected_tps);
     let stability = stability_score(inputs.orders_sent, inputs.timeouts, inputs.connect_errors);
     let resource = resource_efficiency_score(inputs.cpu_pct, inputs.mem_mb);
-    let final_score = round2(0.40 * latency + 0.30 * throughput + 0.20 * stability + 0.10 * resource);
+    let final_score =
+        round2(0.40 * latency + 0.30 * throughput + 0.20 * stability + 0.10 * resource);
     CompositeScore {
         final_score,
         latency_score: latency,
