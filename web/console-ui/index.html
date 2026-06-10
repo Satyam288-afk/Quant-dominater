@@ -1,0 +1,958 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IICPC Control Console</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0f1113;
+        --surface: #171a1d;
+        --surface-2: #1d2226;
+        --line: #30363d;
+        --line-soft: #242a30;
+        --text: #f4f7f9;
+        --muted: #a7b1bb;
+        --dim: #78838d;
+        --green: #5ed991;
+        --red: #ff7676;
+        --amber: #f0bf63;
+        --cyan: #6ec7df;
+        --blue: #89a9ff;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+      }
+
+      main {
+        width: min(1500px, calc(100vw - 32px));
+        margin: 22px auto 34px;
+      }
+
+      header {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 16px;
+        align-items: end;
+        margin-bottom: 16px;
+      }
+
+      h1,
+      h2 {
+        margin: 0;
+        letter-spacing: 0;
+      }
+
+      h1 {
+        font-size: clamp(28px, 3.2vw, 42px);
+        line-height: 1.05;
+        font-weight: 780;
+      }
+
+      h2 {
+        font-size: 15px;
+        font-weight: 750;
+      }
+
+      .subhead,
+      .muted,
+      .label,
+      .small {
+        color: var(--muted);
+      }
+
+      .subhead {
+        margin-top: 6px;
+        font-size: 14px;
+      }
+
+      .service-strip {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: flex-end;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        min-height: 26px;
+        padding: 4px 9px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .badge.ok {
+        border-color: rgba(94, 217, 145, 0.38);
+        color: var(--green);
+      }
+
+      .badge.warn {
+        border-color: rgba(240, 191, 99, 0.38);
+        color: var(--amber);
+      }
+
+      .badge.bad {
+        border-color: rgba(255, 118, 118, 0.38);
+        color: var(--red);
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 430px minmax(0, 1fr);
+        gap: 14px;
+        align-items: start;
+      }
+
+      .stack {
+        display: grid;
+        gap: 14px;
+      }
+
+      .panel,
+      .metric,
+      .timeline-step {
+        border: 1px solid var(--line);
+        background: var(--surface);
+        border-radius: 8px;
+      }
+
+      .panel {
+        overflow: hidden;
+      }
+
+      .panel-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--line-soft);
+      }
+
+      .panel-body {
+        padding: 16px;
+      }
+
+      .field-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .field {
+        display: grid;
+        gap: 7px;
+      }
+
+      .field.full {
+        grid-column: 1 / -1;
+      }
+
+      label,
+      .label {
+        font-size: 11px;
+        font-weight: 780;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      input,
+      select {
+        width: 100%;
+        min-height: 40px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: #101316;
+        color: var(--text);
+        padding: 9px 10px;
+        font: inherit;
+      }
+
+      input[type="file"] {
+        padding: 8px;
+      }
+
+      input[type="checkbox"] {
+        width: 18px;
+        min-height: 18px;
+      }
+
+      .check-row {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        min-height: 40px;
+      }
+
+      .button-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-top: 14px;
+      }
+
+      button {
+        min-height: 42px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: var(--surface-2);
+        color: var(--text);
+        font: inherit;
+        font-weight: 720;
+        cursor: pointer;
+      }
+
+      button.primary {
+        border-color: rgba(110, 199, 223, 0.45);
+        background: #17313a;
+        color: #dff8ff;
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      .status-line {
+        min-height: 22px;
+        margin-top: 12px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .timeline {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .timeline-step {
+        padding: 12px;
+        min-height: 82px;
+      }
+
+      .timeline-step.active {
+        border-color: rgba(110, 199, 223, 0.45);
+      }
+
+      .timeline-step.done {
+        border-color: rgba(94, 217, 145, 0.35);
+      }
+
+      .timeline-step.failed {
+        border-color: rgba(255, 118, 118, 0.45);
+      }
+
+      .step-title {
+        font-size: 13px;
+        font-weight: 740;
+      }
+
+      .step-copy {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .metric-grid {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .metric {
+        padding: 14px;
+        min-height: 92px;
+      }
+
+      .value {
+        display: block;
+        margin-top: 12px;
+        font-size: 25px;
+        line-height: 1;
+        font-weight: 780;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .small {
+        display: block;
+        margin-top: 8px;
+        font-size: 12px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 360px;
+        gap: 14px;
+        align-items: start;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+      }
+
+      table {
+        width: 100%;
+        min-width: 760px;
+        border-collapse: collapse;
+        table-layout: fixed;
+      }
+
+      th,
+      td {
+        padding: 12px 10px;
+        border-bottom: 1px solid var(--line-soft);
+        text-align: left;
+        font-size: 13px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      th {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 780;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        background: #14171a;
+      }
+
+      .num {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .valid {
+        color: var(--green);
+      }
+
+      .invalid {
+        color: var(--red);
+      }
+
+      .detail-row {
+        display: grid;
+        grid-template-columns: 112px minmax(0, 1fr);
+        gap: 12px;
+        padding: 9px 0;
+        border-bottom: 1px solid var(--line-soft);
+        font-size: 13px;
+      }
+
+      .detail-row:last-child {
+        border-bottom: 0;
+      }
+
+      .detail-value {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .artifact-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .artifact-chip {
+        display: inline-flex;
+        align-items: center;
+        min-height: 28px;
+        padding: 4px 9px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        font-size: 12px;
+        text-decoration: none;
+      }
+
+      .artifact-chip.ready {
+        border-color: rgba(110, 199, 223, 0.35);
+        color: var(--cyan);
+      }
+
+      .log {
+        min-height: 120px;
+        max-height: 220px;
+        overflow: auto;
+        margin: 0;
+        padding: 14px 16px;
+        background: #0c0f11;
+        color: var(--muted);
+        font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+
+      @media (max-width: 1180px) {
+        .layout,
+        .split {
+          grid-template-columns: 1fr;
+        }
+
+        .metric-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 760px) {
+        main {
+          width: calc(100vw - 20px);
+          margin: 16px auto 24px;
+        }
+
+        header {
+          grid-template-columns: 1fr;
+        }
+
+        .service-strip {
+          justify-content: flex-start;
+        }
+
+        .field-grid,
+        .button-row,
+        .timeline,
+        .metric-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>IICPC Control Console</h1>
+          <div class="subhead">upload -> sandbox -> benchmark -> validate -> score -> leaderboard</div>
+        </div>
+        <div class="service-strip">
+          <span class="badge" id="svc-console">console</span>
+          <span class="badge" id="svc-submission">submission</span>
+          <span class="badge" id="svc-orchestrator">orchestrator</span>
+          <span class="badge" id="svc-leaderboard">leaderboard</span>
+        </div>
+      </header>
+
+      <section class="layout">
+        <div class="stack">
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Submit Engine</h2>
+              <span class="badge" id="submission-state">waiting</span>
+            </div>
+            <div class="panel-body">
+              <form id="run-form" autocomplete="off">
+                <div class="field-grid">
+                  <div class="field">
+                    <label for="team-id">Team ID</label>
+                    <input id="team-id" name="team_id" value="demo_team" required />
+                  </div>
+                  <div class="field">
+                    <label for="language">Language</label>
+                    <select id="language" name="language">
+                      <option value="go">Go</option>
+                      <option value="rust">Rust</option>
+                      <option value="cpp">C++</option>
+                    </select>
+                  </div>
+                  <div class="field full">
+                    <label for="artifact">Engine ZIP</label>
+                    <input id="artifact" name="artifact" type="file" accept=".zip,.tar,.gz,.go" required />
+                  </div>
+                  <div class="field">
+                    <label for="bot-count">Bots</label>
+                    <input id="bot-count" type="number" min="1" value="10" />
+                  </div>
+                  <div class="field">
+                    <label for="rate-per-bot">Rate / Bot</label>
+                    <input id="rate-per-bot" type="number" min="1" value="2" />
+                  </div>
+                  <div class="field">
+                    <label for="duration-sec">Duration</label>
+                    <input id="duration-sec" type="number" min="1" value="5" />
+                  </div>
+                  <div class="field">
+                    <label for="seed">Seed</label>
+                    <input id="seed" type="number" value="42" />
+                  </div>
+                  <div class="field">
+                    <label for="cpu-limit">CPU Limit</label>
+                    <input id="cpu-limit" value="1" />
+                  </div>
+                  <div class="field">
+                    <label for="memory-limit">Memory Limit</label>
+                    <input id="memory-limit" value="512Mi" />
+                  </div>
+                  <div class="field full">
+                    <label>Network</label>
+                    <div class="check-row">
+                      <input id="network-egress" type="checkbox" autocomplete="off" />
+                      <span class="muted">allow internet egress</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="button-row">
+                  <button type="button" id="load-example">Use example ZIP</button>
+                  <button class="primary" id="submit-run" type="submit">Submit & Run</button>
+                </div>
+                <div class="status-line" id="form-status">Ready.</div>
+              </form>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Run Timeline</h2>
+              <span class="badge" id="run-state">idle</span>
+            </div>
+            <div class="panel-body">
+              <div class="timeline" id="timeline"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stack">
+          <section class="metric-grid">
+            <div class="metric">
+              <span class="label">Score</span>
+              <span class="value" id="metric-score">-</span>
+              <span class="small" id="metric-valid">-</span>
+            </div>
+            <div class="metric">
+              <span class="label">TPS</span>
+              <span class="value" id="metric-tps">-</span>
+              <span class="small">acks / sec</span>
+            </div>
+            <div class="metric">
+              <span class="label">p99</span>
+              <span class="value" id="metric-p99">-</span>
+              <span class="small">ack latency</span>
+            </div>
+            <div class="metric">
+              <span class="label">Orders</span>
+              <span class="value" id="metric-orders">-</span>
+              <span class="small" id="metric-acks">-</span>
+            </div>
+            <div class="metric">
+              <span class="label">Fills</span>
+              <span class="value" id="metric-fills">-</span>
+              <span class="small" id="metric-timeouts">-</span>
+            </div>
+            <div class="metric">
+              <span class="label">Artifacts</span>
+              <span class="value" id="metric-artifacts">-</span>
+              <span class="small">audit files</span>
+            </div>
+          </section>
+
+          <section class="split">
+            <div class="stack">
+              <div class="panel">
+                <div class="panel-header">
+                  <h2>Leaderboard</h2>
+                  <span class="badge" id="leaderboard-count">0 runs</span>
+                </div>
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th style="width: 46px">Rank</th>
+                        <th style="width: 118px">Team</th>
+                        <th style="width: 142px">Run</th>
+                        <th style="width: 88px">Status</th>
+                        <th style="width: 66px">Valid</th>
+                        <th class="num" style="width: 70px">Score</th>
+                        <th class="num" style="width: 66px">TPS</th>
+                        <th class="num" style="width: 76px">p99</th>
+                        <th style="width: 88px">Failure</th>
+                      </tr>
+                    </thead>
+                    <tbody id="leaderboard-rows">
+                      <tr><td colspan="9" class="muted">No runs yet.</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-header">
+                  <h2>Artifacts</h2>
+                  <span class="badge" id="artifact-state">waiting</span>
+                </div>
+                <div class="panel-body">
+                  <div class="artifact-list" id="artifact-list"></div>
+                </div>
+              </div>
+            </div>
+
+            <aside class="stack">
+              <div class="panel">
+                <div class="panel-header">
+                  <h2>Run Detail</h2>
+                  <span class="badge" id="detail-state">idle</span>
+                </div>
+                <div class="panel-body" id="run-detail"></div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-header">
+                  <h2>Event Log</h2>
+                  <span class="badge" id="log-count">0</span>
+                </div>
+                <pre class="log" id="event-log"></pre>
+              </div>
+            </aside>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const terminalStates = new Set(["FINISHED", "FAILED", "CANCELLED", "TIMED_OUT"]);
+      const stages = ["QUEUED", "BUILDING", "SANDBOX_STARTING", "HEALTHCHECKING", "BENCHMARKING", "VALIDATING", "SCORING", "FINISHED"];
+      const state = {
+        submission: null,
+        run: null,
+        metrics: null,
+        validation: null,
+        score: null,
+        artifacts: [],
+        poller: null,
+        events: [],
+      };
+
+      const form = document.querySelector("#run-form");
+      const submitButton = document.querySelector("#submit-run");
+      const loadExampleButton = document.querySelector("#load-example");
+      const formStatus = document.querySelector("#form-status");
+      const timeline = document.querySelector("#timeline");
+      const eventLog = document.querySelector("#event-log");
+
+      function escapeHTML(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function number(value) {
+        const n = Number(value);
+        return Number.isFinite(n) ? n : 0;
+      }
+
+      function fmt(value, digits = 2, suffix = "") {
+        if (value === undefined || value === null || value === "") return "-";
+        const n = Number(value);
+        if (!Number.isFinite(n)) return String(value);
+        return `${n.toFixed(digits)}${suffix}`;
+      }
+
+      function fmtInt(value) {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return "-";
+        return new Intl.NumberFormat().format(n);
+      }
+
+      function shortRunId(runId) {
+        if (!runId) return "-";
+        const value = String(runId);
+        return value.length > 24 ? `${value.slice(0, 8)}...${value.slice(-8)}` : value;
+      }
+
+      function setBadge(id, text, cls = "") {
+        const node = document.querySelector(`#${id}`);
+        node.className = `badge ${cls}`.trim();
+        node.textContent = text;
+      }
+
+      function logEvent(message) {
+        const ts = new Date().toLocaleTimeString();
+        state.events.unshift(`${ts} ${message}`);
+        state.events = state.events.slice(0, 80);
+        eventLog.textContent = state.events.join("\n");
+        setBadge("log-count", String(state.events.length));
+      }
+
+      function detailRow(label, value, title) {
+        const safe = escapeHTML(value || "-");
+        const safeTitle = escapeHTML(title || value || "");
+        return `<div class="detail-row"><span class="label">${escapeHTML(label)}</span><span class="detail-value" title="${safeTitle}">${safe}</span></div>`;
+      }
+
+      async function api(path, options = {}) {
+        const res = await fetch(path, options);
+        const text = await res.text();
+        const body = text ? JSON.parse(text) : null;
+        if (!res.ok) {
+          throw new Error(body?.error || `${res.status} ${res.statusText}`);
+        }
+        return body;
+      }
+
+      function runConfig() {
+        return {
+          benchmark_seed: number(document.querySelector("#seed").value),
+          sandbox: {
+            cpu_limit: document.querySelector("#cpu-limit").value.trim() || "1",
+            memory_limit: document.querySelector("#memory-limit").value.trim() || "512Mi",
+            network_egress: document.querySelector("#network-egress").checked,
+          },
+          config: {
+            bot_count: number(document.querySelector("#bot-count").value),
+            rate_per_bot: number(document.querySelector("#rate-per-bot").value),
+            duration_sec: number(document.querySelector("#duration-sec").value),
+            warmup_sec: 0,
+          },
+        };
+      }
+
+      async function submitEngine() {
+        const artifact = document.querySelector("#artifact").files[0];
+        if (!artifact) throw new Error("engine artifact is required");
+
+        const data = new FormData();
+        data.set("team_id", document.querySelector("#team-id").value.trim());
+        data.set("language", document.querySelector("#language").value);
+        data.set("protocol", "ws-json");
+        data.set("artifact", artifact);
+
+        setBadge("submission-state", "uploading", "warn");
+        logEvent(`uploading ${artifact.name}`);
+        const submission = await api("/api/submissions", { method: "POST", body: data });
+        state.submission = submission;
+        setBadge("submission-state", "submitted", "ok");
+        logEvent(`submission ${submission.submission_id} created`);
+        return submission;
+      }
+
+      async function startRun(submission) {
+        setBadge("run-state", "starting", "warn");
+        logEvent("creating benchmark run");
+        const result = await api(`/api/submissions/${encodeURIComponent(submission.submission_id)}/runs`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(runConfig()),
+        });
+        state.run = result.run;
+        logEvent(`run ${state.run.run_id} started`);
+        render();
+        pollRun(state.run.run_id);
+      }
+
+      async function pollRun(runId) {
+        clearInterval(state.poller);
+        const tick = async () => {
+          try {
+            state.run = await api(`/api/runs/${encodeURIComponent(runId)}`);
+            if (state.run.status === "FINISHED") {
+              await loadArtifacts(runId);
+            }
+            await loadLeaderboard();
+            render();
+            if (terminalStates.has(state.run.status)) {
+              clearInterval(state.poller);
+              logEvent(`run ended with ${state.run.status}`);
+              formStatus.textContent = state.run.status === "FINISHED" ? "Benchmark finished." : `Benchmark ended with ${state.run.status}.`;
+            }
+          } catch (err) {
+            logEvent(err.message);
+          }
+        };
+        await tick();
+        state.poller = setInterval(tick, 1000);
+      }
+
+      async function loadArtifacts(runId) {
+        try {
+          const result = await api(`/api/runs/${encodeURIComponent(runId)}/artifacts`);
+          state.artifacts = result.files || [];
+          state.metrics = result.metrics || null;
+          state.validation = result.validation || null;
+          state.score = result.score || null;
+        } catch (err) {
+          logEvent(`artifact lookup: ${err.message}`);
+        }
+      }
+
+      async function loadLeaderboard() {
+        const entries = await api("/api/leaderboard");
+        renderLeaderboard(entries || []);
+      }
+
+      async function loadHealth() {
+        try {
+          const health = await api("/api/health");
+          for (const [id, label, key] of [
+            ["svc-console", "console", "console"],
+            ["svc-submission", "submission", "submission"],
+            ["svc-orchestrator", "orchestrator", "orchestrator"],
+            ["svc-leaderboard", "leaderboard", "leaderboard"],
+          ]) {
+            const ok = health[key]?.status === "ok";
+            setBadge(id, `${label} ${ok ? "ok" : "down"}`, ok ? "ok" : "bad");
+          }
+        } catch {
+          setBadge("svc-console", "console down", "bad");
+        }
+      }
+
+      function renderTimeline() {
+        const status = state.run?.status || "IDLE";
+        const currentIndex = stages.indexOf(status);
+        const failed = ["FAILED", "CANCELLED", "TIMED_OUT"].includes(status);
+        timeline.innerHTML = stages.map((stage, idx) => {
+          let cls = "";
+          if (failed && idx === Math.max(currentIndex, 0)) cls = "failed";
+          else if (idx < currentIndex || status === "FINISHED") cls = "done";
+          else if (idx === currentIndex) cls = "active";
+          return `<div class="timeline-step ${cls}">
+            <div class="step-title">${stage}</div>
+            <div class="step-copy">${stepCopy(stage)}</div>
+          </div>`;
+        }).join("");
+        setBadge("run-state", status.toLowerCase(), failed ? "bad" : status === "FINISHED" ? "ok" : status === "IDLE" ? "" : "warn");
+      }
+
+      function stepCopy(stage) {
+        const copy = {
+          QUEUED: "run accepted",
+          BUILDING: "image/build artifact",
+          SANDBOX_STARTING: "isolated engine",
+          HEALTHCHECKING: "engine /health",
+          BENCHMARKING: "bot fleet traffic",
+          VALIDATING: "reference replay",
+          SCORING: "score formula",
+          FINISHED: "leaderboard update",
+        };
+        return copy[stage] || "";
+      }
+
+      function renderMetrics() {
+        const metrics = state.metrics || {};
+        const validation = state.validation || {};
+        const score = state.score || {};
+        document.querySelector("#metric-score").textContent = state.run?.score ? fmt(state.run.score) : score.score ? fmt(score.score) : "-";
+        document.querySelector("#metric-valid").textContent = validation.valid === true ? "valid" : validation.valid === false ? "invalid" : "-";
+        document.querySelector("#metric-tps").textContent = metrics.tps ? fmt(metrics.tps) : "-";
+        document.querySelector("#metric-p99").textContent = metrics.p99_ms ? fmt(metrics.p99_ms, 2, "ms") : "-";
+        document.querySelector("#metric-orders").textContent = metrics.orders_sent !== undefined ? fmtInt(metrics.orders_sent) : "-";
+        document.querySelector("#metric-acks").textContent = metrics.acks_received !== undefined ? `${fmtInt(metrics.acks_received)} acks` : "-";
+        document.querySelector("#metric-fills").textContent = metrics.fills_received !== undefined ? fmtInt(metrics.fills_received) : "-";
+        document.querySelector("#metric-timeouts").textContent = metrics.timeouts !== undefined ? `${fmtInt(metrics.timeouts)} timeouts` : "-";
+        document.querySelector("#metric-artifacts").textContent = state.artifacts.length ? fmtInt(state.artifacts.length) : "-";
+      }
+
+      function renderDetail() {
+        const run = state.run;
+        const node = document.querySelector("#run-detail");
+        if (!run) {
+          setBadge("detail-state", "idle");
+          node.innerHTML = '<span class="muted">No active run.</span>';
+          return;
+        }
+        setBadge("detail-state", run.status || "unknown", run.status === "FINISHED" ? "ok" : terminalStates.has(run.status) ? "bad" : "warn");
+        node.innerHTML = [
+          detailRow("run", shortRunId(run.run_id), run.run_id),
+          detailRow("team", run.team_id),
+          detailRow("submission", shortRunId(run.submission_id), run.submission_id),
+          detailRow("status", run.status),
+          detailRow("score", run.score ? fmt(run.score) : "-"),
+          detailRow("artifact", run.artifact_dir ? "ready" : "-", run.artifact_dir),
+          detailRow("failure", run.failure_reason || "-"),
+        ].join("");
+      }
+
+      function renderArtifacts() {
+        const list = document.querySelector("#artifact-list");
+        if (!state.artifacts.length) {
+          setBadge("artifact-state", "waiting", "warn");
+          list.innerHTML = '<span class="artifact-chip">no artifacts yet</span>';
+          return;
+        }
+        setBadge("artifact-state", "ready", "ok");
+        list.innerHTML = state.artifacts.map((file) => {
+          return `<a class="artifact-chip ready" href="${escapeHTML(file.url)}" target="_blank" rel="noreferrer">${escapeHTML(file.name)}</a>`;
+        }).join("");
+      }
+
+      function renderLeaderboard(entries) {
+        document.querySelector("#leaderboard-count").textContent = `${entries.length} ${entries.length === 1 ? "run" : "runs"}`;
+        const rows = document.querySelector("#leaderboard-rows");
+        if (!entries.length) {
+          rows.innerHTML = '<tr><td colspan="9" class="muted">No runs yet.</td></tr>';
+          return;
+        }
+        rows.innerHTML = entries.map((entry, idx) => {
+          const valid = entry.valid === true ? "valid" : entry.valid === false ? "invalid" : "pending";
+          return `<tr>
+            <td>${idx + 1}</td>
+            <td title="${escapeHTML(entry.team_id)}">${escapeHTML(entry.team_id || "-")}</td>
+            <td title="${escapeHTML(entry.run_id)}">${escapeHTML(shortRunId(entry.run_id))}</td>
+            <td><span class="badge">${escapeHTML(entry.status || "-")}</span></td>
+            <td class="${valid === "valid" ? "valid" : valid === "invalid" ? "invalid" : ""}">${valid}</td>
+            <td class="num">${fmt(entry.score)}</td>
+            <td class="num">${fmt(entry.tps)}</td>
+            <td class="num">${fmt(entry.p99_ms, 2, "ms")}</td>
+            <td title="${escapeHTML(entry.failure_reason || "")}">${escapeHTML(entry.failure_reason || "-")}</td>
+          </tr>`;
+        }).join("");
+      }
+
+      function render() {
+        renderTimeline();
+        renderMetrics();
+        renderDetail();
+        renderArtifacts();
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        submitButton.disabled = true;
+        formStatus.textContent = "Submitting engine...";
+        try {
+          const submission = await submitEngine();
+          formStatus.textContent = "Starting benchmark...";
+          await startRun(submission);
+          formStatus.textContent = "Benchmark running.";
+        } catch (err) {
+          formStatus.textContent = err.message;
+          logEvent(err.message);
+          setBadge("submission-state", "error", "bad");
+        } finally {
+          submitButton.disabled = false;
+        }
+      });
+
+      loadExampleButton.addEventListener("click", () => {
+        logEvent("example ZIP is created by scripts/run-platform-demo.sh; choose .runs/platform-demo/stub-engine.zip or zip examples/stub-engine");
+        formStatus.textContent = "Choose .runs/platform-demo/stub-engine.zip, or run zip -qr .runs/platform-demo/stub-engine.zip examples/stub-engine contents.";
+      });
+
+      document.querySelector("#network-egress").checked = false;
+      render();
+      loadHealth();
+      loadLeaderboard().catch((err) => logEvent(err.message));
+      setInterval(loadLeaderboard, 2000);
+    </script>
+  </body>
+</html>

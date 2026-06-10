@@ -1,0 +1,878 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IICPC Benchmark Console</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0f1113;
+        --surface: #171a1d;
+        --surface-2: #1f2326;
+        --line: #30363d;
+        --line-soft: #252a2f;
+        --text: #f3f6f8;
+        --muted: #a6b0ba;
+        --dim: #76818c;
+        --green: #5ed991;
+        --red: #ff7676;
+        --amber: #f0bf63;
+        --cyan: #6ec7df;
+        --blue: #85a8ff;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+      }
+
+      main {
+        width: min(1480px, calc(100vw - 32px));
+        margin: 24px auto 32px;
+      }
+
+      header {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 16px;
+        align-items: end;
+        margin-bottom: 18px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(26px, 3vw, 38px);
+        line-height: 1.06;
+        font-weight: 760;
+        letter-spacing: 0;
+      }
+
+      .subhead,
+      .meta,
+      .label,
+      .small {
+        color: var(--muted);
+      }
+
+      .subhead {
+        margin-top: 6px;
+        font-size: 14px;
+      }
+
+      .meta {
+        text-align: right;
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .live-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        margin-right: 7px;
+        border-radius: 50%;
+        background: var(--amber);
+      }
+
+      .live-dot.on {
+        background: var(--green);
+      }
+
+      .live-dot.off {
+        background: var(--red);
+      }
+
+      .metric-grid {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+
+      .metric,
+      .panel,
+      .pipeline-item {
+        border: 1px solid var(--line);
+        background: var(--surface);
+        border-radius: 8px;
+      }
+
+      .metric {
+        min-height: 92px;
+        padding: 14px;
+      }
+
+      .label {
+        display: block;
+        font-size: 11px;
+        font-weight: 750;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .value {
+        display: block;
+        margin-top: 12px;
+        font-size: 26px;
+        line-height: 1;
+        font-weight: 760;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .small {
+        display: block;
+        margin-top: 8px;
+        font-size: 12px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .pipeline {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+
+      .pipeline-item {
+        min-height: 98px;
+        padding: 13px 14px;
+      }
+
+      .pipeline-title {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        align-items: center;
+        font-size: 14px;
+        font-weight: 720;
+      }
+
+      .pipeline-copy {
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.4;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        min-height: 24px;
+        padding: 3px 8px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        font-size: 12px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+
+      .badge.ok {
+        border-color: rgba(94, 217, 145, 0.35);
+        color: var(--green);
+      }
+
+      .badge.warn {
+        border-color: rgba(240, 191, 99, 0.35);
+        color: var(--amber);
+      }
+
+      .badge.bad {
+        border-color: rgba(255, 118, 118, 0.35);
+        color: var(--red);
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 360px;
+        gap: 14px;
+        align-items: start;
+      }
+
+      .left-stack {
+        display: grid;
+        gap: 14px;
+      }
+
+      .panel {
+        overflow: hidden;
+      }
+
+      .panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--line-soft);
+      }
+
+      .panel-title {
+        font-size: 15px;
+        font-weight: 740;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+      }
+
+      table {
+        width: 100%;
+        min-width: 980px;
+        border-collapse: collapse;
+        table-layout: fixed;
+      }
+
+      th,
+      td {
+        padding: 12px 10px;
+        border-bottom: 1px solid var(--line-soft);
+        text-align: left;
+        font-size: 13px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      th {
+        color: var(--muted);
+        font-size: 11px;
+        text-transform: uppercase;
+        font-weight: 760;
+        letter-spacing: 0.04em;
+        background: #14171a;
+      }
+
+      tbody tr {
+        background: var(--surface);
+      }
+
+      tbody tr:hover {
+        background: #1b2024;
+      }
+
+      tr:last-child td {
+        border-bottom: 0;
+      }
+
+      .num {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .valid {
+        color: var(--green);
+      }
+
+      .invalid {
+        color: var(--red);
+      }
+
+      .pending {
+        color: var(--muted);
+      }
+
+      .empty {
+        padding: 30px;
+        color: var(--muted);
+      }
+
+      .side {
+        display: grid;
+        gap: 14px;
+      }
+
+      .detail {
+        padding: 15px 16px;
+      }
+
+      .detail-row {
+        display: grid;
+        grid-template-columns: 116px minmax(0, 1fr);
+        gap: 12px;
+        padding: 9px 0;
+        border-bottom: 1px solid var(--line-soft);
+        font-size: 13px;
+      }
+
+      .detail-row:last-child {
+        border-bottom: 0;
+      }
+
+      .detail-value {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .score-bars {
+        padding: 14px 16px 16px;
+      }
+
+      .audit {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 220px;
+        gap: 16px;
+        padding: 15px 16px 16px;
+      }
+
+      .artifact-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .artifact-chip {
+        display: inline-flex;
+        align-items: center;
+        min-height: 28px;
+        padding: 4px 9px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .artifact-chip.ready {
+        border-color: rgba(110, 199, 223, 0.35);
+        color: var(--cyan);
+      }
+
+      .audit-path {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+      }
+
+      .bar-row {
+        display: grid;
+        grid-template-columns: 96px minmax(0, 1fr) 46px;
+        gap: 10px;
+        align-items: center;
+        margin-top: 12px;
+        font-size: 12px;
+      }
+
+      .bar-track {
+        height: 8px;
+        border-radius: 999px;
+        background: #262b30;
+        overflow: hidden;
+      }
+
+      .bar-fill {
+        height: 100%;
+        width: 0%;
+        border-radius: inherit;
+        background: var(--cyan);
+      }
+
+      .bar-fill.latency {
+        background: var(--green);
+      }
+
+      .bar-fill.throughput {
+        background: var(--blue);
+      }
+
+      .bar-fill.stability {
+        background: var(--amber);
+      }
+
+      .bar-fill.resource {
+        background: var(--cyan);
+      }
+
+      @media (max-width: 1120px) {
+        .metric-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .pipeline {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .layout {
+          grid-template-columns: 1fr;
+        }
+
+        .audit {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 720px) {
+        main {
+          width: calc(100vw - 20px);
+          margin: 16px auto 24px;
+        }
+
+        header {
+          grid-template-columns: 1fr;
+          align-items: start;
+        }
+
+        .meta {
+          text-align: left;
+        }
+
+        .metric-grid,
+        .pipeline {
+          grid-template-columns: 1fr;
+        }
+
+        .value {
+          font-size: 24px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>IICPC Benchmark Console</h1>
+          <div class="subhead">submission -> sandbox -> bot fleet -> validation -> scoring -> leaderboard</div>
+        </div>
+        <div class="meta">
+          <div><span class="live-dot" id="live-dot"></span><span id="connection">connecting</span></div>
+          <div id="updated">waiting for runs</div>
+        </div>
+      </header>
+
+      <section class="metric-grid" aria-label="benchmark summary">
+        <div class="metric">
+          <span class="label">Top Score</span>
+          <span class="value" id="top-score">-</span>
+          <span class="small" id="top-team">no leader</span>
+        </div>
+        <div class="metric">
+          <span class="label">Valid Runs</span>
+          <span class="value" id="valid-runs">-</span>
+          <span class="small" id="valid-rate">-</span>
+        </div>
+        <div class="metric">
+          <span class="label">Ack Rate</span>
+          <span class="value" id="ack-rate">-</span>
+          <span class="small" id="ack-count">-</span>
+        </div>
+        <div class="metric">
+          <span class="label">Best TPS</span>
+          <span class="value" id="best-tps">-</span>
+          <span class="small">acks per second</span>
+        </div>
+        <div class="metric">
+          <span class="label">Best p99</span>
+          <span class="value" id="best-p99">-</span>
+          <span class="small">ack latency</span>
+        </div>
+        <div class="metric">
+          <span class="label">Timeouts</span>
+          <span class="value" id="timeouts">-</span>
+          <span class="small" id="connect-errors">-</span>
+        </div>
+      </section>
+
+      <section class="pipeline" aria-label="pipeline evidence">
+        <div class="pipeline-item">
+          <div class="pipeline-title">
+            <span>Submission + Sandbox</span>
+            <span class="badge" id="stage-submission">waiting</span>
+          </div>
+          <div class="pipeline-copy" id="stage-submission-copy">No completed run evidence yet.</div>
+        </div>
+        <div class="pipeline-item">
+          <div class="pipeline-title">
+            <span>Distributed Bot Fleet</span>
+            <span class="badge" id="stage-bots">waiting</span>
+          </div>
+          <div class="pipeline-copy" id="stage-bots-copy">No order stream recorded yet.</div>
+        </div>
+        <div class="pipeline-item">
+          <div class="pipeline-title">
+            <span>Validation Gate</span>
+            <span class="badge" id="stage-validation">waiting</span>
+          </div>
+          <div class="pipeline-copy" id="stage-validation-copy">No replay result recorded yet.</div>
+        </div>
+        <div class="pipeline-item">
+          <div class="pipeline-title">
+            <span>Live Leaderboard</span>
+            <span class="badge" id="stage-leaderboard">waiting</span>
+          </div>
+          <div class="pipeline-copy" id="stage-leaderboard-copy">Waiting for WebSocket snapshot.</div>
+        </div>
+      </section>
+
+      <section class="layout">
+        <div class="left-stack">
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title">Leaderboard</div>
+              <span class="badge" id="run-count">0 runs</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width: 52px">Rank</th>
+                    <th style="width: 132px">Team</th>
+                    <th style="width: 150px">Run</th>
+                    <th style="width: 94px">Status</th>
+                    <th style="width: 68px">Valid</th>
+                    <th class="num" style="width: 76px">Score</th>
+                    <th class="num" style="width: 68px">TPS</th>
+                    <th class="num" style="width: 78px">p99</th>
+                    <th class="num" style="width: 76px">Orders</th>
+                    <th class="num" style="width: 70px">Acks</th>
+                    <th class="num" style="width: 68px">Fills</th>
+                    <th class="num" style="width: 82px">Timeouts</th>
+                    <th style="width: 130px">Failure</th>
+                  </tr>
+                </thead>
+                <tbody id="rows">
+                  <tr>
+                    <td class="empty" colspan="13">No runs yet.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title">Audit Trail</div>
+              <span class="badge" id="audit-status">waiting</span>
+            </div>
+            <div class="audit">
+              <div>
+                <div class="artifact-list" id="artifact-list"></div>
+              </div>
+              <div class="audit-path" id="artifact-path">No artifact directory yet.</div>
+            </div>
+          </div>
+        </div>
+
+        <aside class="side">
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title">Top Run</div>
+              <span class="badge" id="top-run-status">waiting</span>
+            </div>
+            <div class="detail" id="top-run-detail"></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title">Score Breakdown</div>
+              <span class="badge" id="correctness-gate">-</span>
+            </div>
+            <div class="score-bars" id="score-bars"></div>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <script>
+      const rows = document.querySelector("#rows");
+      const connection = document.querySelector("#connection");
+      const updated = document.querySelector("#updated");
+      const liveDot = document.querySelector("#live-dot");
+      const runCount = document.querySelector("#run-count");
+      const topRunDetail = document.querySelector("#top-run-detail");
+      const topRunStatus = document.querySelector("#top-run-status");
+      const scoreBars = document.querySelector("#score-bars");
+      const correctnessGate = document.querySelector("#correctness-gate");
+      const auditStatus = document.querySelector("#audit-status");
+      const artifactList = document.querySelector("#artifact-list");
+      const artifactPath = document.querySelector("#artifact-path");
+
+      const summary = {
+        topScore: document.querySelector("#top-score"),
+        topTeam: document.querySelector("#top-team"),
+        validRuns: document.querySelector("#valid-runs"),
+        validRate: document.querySelector("#valid-rate"),
+        ackRate: document.querySelector("#ack-rate"),
+        ackCount: document.querySelector("#ack-count"),
+        bestTps: document.querySelector("#best-tps"),
+        bestP99: document.querySelector("#best-p99"),
+        timeouts: document.querySelector("#timeouts"),
+        connectErrors: document.querySelector("#connect-errors"),
+      };
+
+      const stages = {
+        submission: [document.querySelector("#stage-submission"), document.querySelector("#stage-submission-copy")],
+        bots: [document.querySelector("#stage-bots"), document.querySelector("#stage-bots-copy")],
+        validation: [document.querySelector("#stage-validation"), document.querySelector("#stage-validation-copy")],
+        leaderboard: [document.querySelector("#stage-leaderboard"), document.querySelector("#stage-leaderboard-copy")],
+      };
+
+      let websocketLive = false;
+
+      function escapeHTML(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function number(value) {
+        const n = Number(value);
+        return Number.isFinite(n) ? n : 0;
+      }
+
+      function fmt(value, digits = 2, suffix = "") {
+        if (value === undefined || value === null || value === "") return "-";
+        const n = Number(value);
+        if (!Number.isFinite(n)) return String(value);
+        return `${n.toFixed(digits)}${suffix}`;
+      }
+
+      function fmtInt(value) {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return "-";
+        return new Intl.NumberFormat().format(n);
+      }
+
+      function pct(part, total) {
+        if (!total) return "-";
+        return `${((part / total) * 100).toFixed(1)}%`;
+      }
+
+      function shortRunId(runId) {
+        if (!runId) return "-";
+        const value = String(runId);
+        return value.length > 24 ? `${value.slice(0, 8)}...${value.slice(-8)}` : value;
+      }
+
+      function validity(entry) {
+        if (entry.valid === true) return { cls: "valid", text: "valid" };
+        if (entry.valid === false) return { cls: "invalid", text: "invalid" };
+        return { cls: "pending", text: "pending" };
+      }
+
+      function setBadge(node, text, cls) {
+        node.className = `badge ${cls || ""}`.trim();
+        node.textContent = text;
+      }
+
+      function aggregate(entries) {
+        const totals = entries.reduce(
+          (acc, entry) => {
+            acc.orders += number(entry.orders_sent);
+            acc.acks += number(entry.acks_received);
+            acc.fills += number(entry.fills_received);
+            acc.timeouts += number(entry.timeouts);
+            acc.connectErrors += number(entry.connect_errors);
+            if (entry.valid === true) acc.valid += 1;
+            if (entry.valid === false) acc.invalid += 1;
+            return acc;
+          },
+          { orders: 0, acks: 0, fills: 0, timeouts: 0, connectErrors: 0, valid: 0, invalid: 0 },
+        );
+        const top = entries[0] || null;
+        const bestTps = entries.reduce((best, entry) => Math.max(best, number(entry.tps)), 0);
+        const p99s = entries.map((entry) => number(entry.p99_ms)).filter((value) => value > 0);
+        const bestP99 = p99s.length ? Math.min(...p99s) : 0;
+        return { ...totals, top, bestTps, bestP99 };
+      }
+
+      function renderSummary(entries) {
+        const data = aggregate(entries);
+        summary.topScore.textContent = data.top ? fmt(data.top.score) : "-";
+        summary.topTeam.textContent = data.top ? data.top.team_id || data.top.run_id : "no leader";
+        summary.validRuns.textContent = `${data.valid}/${entries.length || 0}`;
+        summary.validRate.textContent = entries.length ? `${pct(data.valid, entries.length)} pass rate` : "-";
+        summary.ackRate.textContent = pct(data.acks, data.orders);
+        summary.ackCount.textContent = data.orders ? `${fmtInt(data.acks)} / ${fmtInt(data.orders)} acks` : "-";
+        summary.bestTps.textContent = data.bestTps ? fmt(data.bestTps, 2) : "-";
+        summary.bestP99.textContent = data.bestP99 ? fmt(data.bestP99, 2, "ms") : "-";
+        summary.timeouts.textContent = fmtInt(data.timeouts);
+        summary.connectErrors.textContent = `${fmtInt(data.connectErrors)} connect errors`;
+        runCount.textContent = `${entries.length} ${entries.length === 1 ? "run" : "runs"}`;
+      }
+
+      function renderPipeline(entries) {
+        const data = aggregate(entries);
+        const top = data.top;
+        const hasRun = entries.length > 0;
+        const hasArtifacts = Boolean(top && top.artifact_dir);
+        const hasOrders = data.orders > 0;
+        const validationChecked = entries.some((entry) => number(entry.fills_checked) > 0 || entry.valid === true || entry.valid === false);
+
+        setBadge(stages.submission[0], hasArtifacts ? "evidence" : hasRun ? "local" : "waiting", hasArtifacts || hasRun ? "ok" : "warn");
+        stages.submission[1].textContent = hasArtifacts ? "Submission, sandbox, and artifact directory recorded." : hasRun ? "Run record exists; artifact path not published." : "No completed run evidence yet.";
+
+        setBadge(stages.bots[0], hasOrders ? "active" : "waiting", hasOrders ? "ok" : "warn");
+        stages.bots[1].textContent = hasOrders ? `${fmtInt(data.orders)} orders, ${fmtInt(data.acks)} acks, ${fmtInt(data.fills)} fills.` : "No order stream recorded yet.";
+
+        setBadge(stages.validation[0], validationChecked ? "gated" : "waiting", validationChecked ? (data.invalid ? "bad" : "ok") : "warn");
+        stages.validation[1].textContent = validationChecked ? `${data.valid} valid, ${data.invalid} invalid. Correctness gates scoring.` : "No replay result recorded yet.";
+
+        setBadge(stages.leaderboard[0], websocketLive ? "live" : "polling", websocketLive ? "ok" : "warn");
+        stages.leaderboard[1].textContent = websocketLive ? "WebSocket snapshots are connected." : "Initial HTTP snapshot loaded; WebSocket reconnecting.";
+      }
+
+      function detailRow(label, value, title) {
+        const safe = escapeHTML(value || "-");
+        const safeTitle = escapeHTML(title || value || "");
+        return `<div class="detail-row"><span class="label">${escapeHTML(label)}</span><span class="detail-value" title="${safeTitle}">${safe}</span></div>`;
+      }
+
+      function renderTopRun(entries) {
+        const top = entries[0];
+        if (!top) {
+          setBadge(topRunStatus, "waiting", "warn");
+          topRunDetail.innerHTML = '<div class="empty">No run selected.</div>';
+          correctnessGate.textContent = "-";
+          scoreBars.innerHTML = '<div class="empty">No score yet.</div>';
+          return;
+        }
+
+        const valid = validity(top);
+        setBadge(topRunStatus, top.status || "unknown", top.valid ? "ok" : "bad");
+        setBadge(correctnessGate, top.correctness_gate || valid.text, top.valid ? "ok" : "bad");
+        topRunDetail.innerHTML = [
+          detailRow("team", top.team_id || "-"),
+          detailRow("run", shortRunId(top.run_id), top.run_id),
+          detailRow("score", fmt(top.score)),
+          detailRow("valid", valid.text),
+          detailRow("orders", fmtInt(number(top.orders_sent))),
+          detailRow("acks", fmtInt(number(top.acks_received))),
+          detailRow("fills", fmtInt(number(top.fills_received))),
+          detailRow("timeouts", fmtInt(number(top.timeouts))),
+          detailRow("artifact", top.artifact_dir ? "ready" : "-", top.artifact_dir),
+          detailRow("failure", top.failure_reason || "-"),
+        ].join("");
+
+        const bars = [
+          ["latency", top.latency_score, "latency"],
+          ["throughput", top.throughput_score, "throughput"],
+          ["stability", top.stability_score, "stability"],
+          ["resource", top.resource_score, "resource"],
+        ];
+        scoreBars.innerHTML = bars
+          .map(([label, value, cls]) => {
+            const width = Math.max(0, Math.min(100, number(value)));
+            return `<div class="bar-row">
+              <span class="label">${label}</span>
+              <span class="bar-track"><span class="bar-fill ${cls}" style="width: ${width}%"></span></span>
+              <span class="num">${fmt(width, 0)}</span>
+            </div>`;
+          })
+          .join("");
+      }
+
+      function renderAudit(entries) {
+        const top = entries[0];
+        if (!top || !top.artifact_dir) {
+          setBadge(auditStatus, "waiting", "warn");
+          artifactList.innerHTML = '<span class="artifact-chip">no artifacts</span>';
+          artifactPath.textContent = "No artifact directory yet.";
+          return;
+        }
+
+        setBadge(auditStatus, "ready", "ok");
+        const files = [
+          "orders.jsonl",
+          "acks.jsonl",
+          "fills.jsonl",
+          "metrics.json",
+          "validation.json",
+          "score.json",
+          "run_spec.json",
+        ];
+        artifactList.innerHTML = files.map((file) => `<span class="artifact-chip ready">${file}</span>`).join("");
+        artifactPath.textContent = top.artifact_dir;
+      }
+
+      function renderTable(entries) {
+        if (!entries || entries.length === 0) {
+          rows.innerHTML = '<tr><td class="empty" colspan="13">No runs yet.</td></tr>';
+          return;
+        }
+        rows.innerHTML = entries
+          .map((entry, idx) => {
+            const valid = validity(entry);
+            const teamId = escapeHTML(entry.team_id || "-");
+            const runId = escapeHTML(entry.run_id || "");
+            const visibleRunId = escapeHTML(shortRunId(entry.run_id));
+            const status = escapeHTML(entry.status || "-");
+            const failure = escapeHTML(entry.failure_reason || "-");
+            return `<tr>
+              <td>${idx + 1}</td>
+              <td title="${teamId}">${teamId}</td>
+              <td title="${runId}">${visibleRunId}</td>
+              <td><span class="badge">${status}</span></td>
+              <td class="${valid.cls}">${valid.text}</td>
+              <td class="num">${fmt(entry.score)}</td>
+              <td class="num">${fmt(entry.tps)}</td>
+              <td class="num">${fmt(entry.p99_ms, 2, "ms")}</td>
+              <td class="num">${fmtInt(number(entry.orders_sent))}</td>
+              <td class="num">${fmtInt(number(entry.acks_received))}</td>
+              <td class="num">${fmtInt(number(entry.fills_received))}</td>
+              <td class="num">${fmtInt(number(entry.timeouts))}</td>
+              <td title="${failure}">${failure}</td>
+            </tr>`;
+          })
+          .join("");
+      }
+
+      function render(entries) {
+        const safeEntries = Array.isArray(entries) ? entries : [];
+        renderSummary(safeEntries);
+        renderPipeline(safeEntries);
+        renderTopRun(safeEntries);
+        renderAudit(safeEntries);
+        renderTable(safeEntries);
+        updated.textContent = safeEntries.length ? `updated ${new Date().toLocaleTimeString()}` : "waiting for runs";
+      }
+
+      function setConnection(state) {
+        connection.textContent = state;
+        liveDot.className = `live-dot ${state === "live" ? "on" : state === "disconnected" ? "off" : ""}`;
+      }
+
+      async function loadInitial() {
+        const res = await fetch("/leaderboard");
+        render(await res.json());
+      }
+
+      function connectWS() {
+        const proto = location.protocol === "https:" ? "wss:" : "ws:";
+        const ws = new WebSocket(`${proto}//${location.host}/ws`);
+        ws.addEventListener("open", () => {
+          websocketLive = true;
+          setConnection("live");
+        });
+        ws.addEventListener("message", (event) => {
+          render(JSON.parse(event.data));
+        });
+        ws.addEventListener("close", () => {
+          websocketLive = false;
+          setConnection("disconnected");
+          setTimeout(connectWS, 1000);
+        });
+      }
+
+      setConnection("connecting");
+      loadInitial().catch(() => {
+        updated.textContent = "snapshot unavailable";
+      });
+      connectWS();
+    </script>
+  </body>
+</html>

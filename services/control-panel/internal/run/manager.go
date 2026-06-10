@@ -88,6 +88,9 @@ func (m *Manager) CreateRun(ctx context.Context, req RunRequest) (*BenchmarkRun,
 	if err := writeJSON(filepath.Join(artifactDir, "run_spec.json"), r); err != nil {
 		return nil, err
 	}
+	if err := writeJSON(filepath.Join(artifactDir, "config.json"), normalized); err != nil {
+		return nil, err
+	}
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	m.mu.Lock()
@@ -254,6 +257,11 @@ func (m *Manager) save(ctx context.Context, r *BenchmarkRun) error {
 
 func createArtifactPlaceholders(artifactDir string) error {
 	names := []string{
+		"config.json",
+		"orders.jsonl",
+		"acks.jsonl",
+		"fills.jsonl",
+		"cancels.jsonl",
 		"engine_outputs.jsonl",
 		"events.jsonl",
 		"contestant_outputs.jsonl",
