@@ -50,11 +50,18 @@ impl ConnectionPool {
     /// multi-pod Indexed Job; inbound routing subtracts the offset to land on
     /// the right LOCAL inbox, and silently drops messages whose counterparty
     /// lives on another pod (that pod owns its own side of the trade).
+    /// `stamp_ttl` bounds the wire-stamp map: entries older than this are
+    /// swept (an order whose ack never came — timeout, lost counterparty pod —
+    /// would otherwise leak its stamp forever; measured ~205 B/entry and a
+    /// 180ms+ rehash stall inside the shared mutex at multi-million-entry
+    /// growth on long saturation runs). Callers pass ack_timeout + grace, so
+    /// no stamp that can still be consumed is ever dropped.
     pub async fn connect(
         target: &str,
         n_conns: usize,
         n_bots: usize,
         pod_offset: usize,
+        stamp_ttl: Duration,
     ) -> Result<Self> {
         assert!(
             n_conns >= 1 && n_bots >= 1,
@@ -73,6 +80,26 @@ impl ConnectionPool {
         let inboxes_tx = Arc::new(inboxes_tx);
         let reconnects = Arc::new(AtomicU64::new(0));
         let wire_sent: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+
+        // Stamp-map sweeper: drops entries older than stamp_ttl. Exits once
+        // every other holder of the map (pool, supervisors, bots) is gone.
+        {
+            let map = Arc::clone(&wire_sent);
+            let period = stamp_ttl.max(Duration::from_millis(250));
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(period);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tick.tick().await;
+                    if Arc::strong_count(&map) <= 1 {
+                        return;
+                    }
+                    map.lock()
+                        .unwrap()
+                        .retain(|_, sent| sent.elapsed() < stamp_ttl);
+                }
+            });
+        }
 
         let mut senders = Vec::with_capacity(n_conns);
         for _ in 0..n_conns {

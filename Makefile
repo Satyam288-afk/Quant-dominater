@@ -33,7 +33,7 @@ validate-fixture:
 	cargo run -p validator -- --events fixtures/events.valid.jsonl --contestant-outputs fixtures/contestant_outputs.valid.jsonl
 
 stub-engine:
-	cd examples/stub-engine && go run . --addr :8080 --events engine-events.jsonl
+	cd examples/stub-engine && go run . --addr :8080 --engine mutex --events engine-events.jsonl
 
 rust-engine:
 	cargo run -p rust-engine -- --addr :8080 --events engine-events.jsonl

@@ -162,12 +162,13 @@ func (b *Board) Subscribe() (<-chan []byte, func()) {
 	b.mu.Unlock()
 
 	ch <- payload
+	// cancel only unregisters; it must NOT close(ch). refresh() snapshots the
+	// subscriber list under the lock but sends after unlock, so a close here
+	// races that send (send on closed channel would kill the background
+	// refresh goroutine). The unregistered channel is garbage collected.
 	cancel := func() {
 		b.mu.Lock()
-		if _, ok := b.subscribers[ch]; ok {
-			delete(b.subscribers, ch)
-			close(ch)
-		}
+		delete(b.subscribers, ch)
 		b.mu.Unlock()
 	}
 	return ch, cancel

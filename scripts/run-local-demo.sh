@@ -26,12 +26,13 @@ trap cleanup EXIT
 echo "starting stub engine on :8080"
 # Set STUB_PPROF=:6060 to expose net/http/pprof on the engine (see docs/PROFILING.md).
 # --engine disruptor: at this exact load the lock-free engine measured
-# p50/p99 0.48/2.00ms vs the mutex engine's 1.52/4.95ms (cost: ~55% of one
+# p50/p99 0.48/2.00ms vs the mutex engine's 1.52/4.95ms (cost: ~30% of one
 # core while idle — fine on a bench host). STUB_ENGINE=mutex flips it back.
-(
-  cd "$ENGINE_DIR"
-  go run . --addr :8080 --engine "${STUB_ENGINE:-disruptor}" --events "$RUN_DIR/engine-events.jsonl" ${STUB_PPROF:+--pprof "$STUB_PPROF"}
-) &
+# Build then exec the binary DIRECTLY: with `( cd ...; go run . ) &` the
+# recorded pid is the subshell, bash does not forward SIGTERM, and the engine
+# survived cleanup as an orphan — so the graceful audit flush never ran.
+(cd "$ENGINE_DIR" && go build -o "$RUN_DIR/stub-engine" .)
+"$RUN_DIR/stub-engine" --addr :8080 --engine "${STUB_ENGINE:-disruptor}" --events "$RUN_DIR/engine-events.jsonl" ${STUB_PPROF:+--pprof "$STUB_PPROF"} &
 ENGINE_PID=$!
 
 for _ in {1..50}; do

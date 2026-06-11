@@ -21,7 +21,14 @@ import (
 )
 
 const (
-	disruptorShards  = 32
+	// 8 shards, not 32: on the 12-core bench host 32 busy-spin matchers
+	// oversubscribe the cores they share with the WS goroutines. Measured A/B
+	// (backoff byte-identical, two independent verifications): idle CPU
+	// ~53% -> ~30% of a core; high load (200 bots x 20/s, 32 symbols)
+	// p50 2.2 -> 1.1ms, p99 5.1 -> 1.6ms; canonical demo load unchanged
+	// within noise. Per-symbol FIFO is preserved (fnv32 mod shards, single
+	// consumer per shard) at any shard count.
+	disruptorShards  = 8
 	disruptorRingLog = 14 // 16384 slots per shard
 	disruptorOutputs = 4
 )
@@ -95,8 +102,12 @@ func (r *ring) consume() orderReq {
 // order during the hot-spin/yield tiers and stays on-core for lowest latency;
 // only a genuinely idle shard reaches the sleep tier and yields its core. (We
 // tried a channel-park "blocking" strategy — it cut idle CPU but added wakeup
-// latency to active matchers, the classic LMAX BusySpin-vs-Blocking trade-off,
-// so we kept busy-spin since latency is the goal here.)
+// latency to active matchers, the classic LMAX BusySpin-vs-Blocking trade-off.
+// An escalating sleep tier was also measured and rejected: idle CPU fell to
+// ~7% but the canonical-load p50/p99 regressed ~40% in every round. The lever
+// that actually paid was the SHARD COUNT, not the wait strategy — see the
+// disruptorShards comment: fewer spinners than cores keeps the hot tiers hot
+// without oversubscribing the host.)
 func backoff(spins int) {
 	switch {
 	case spins < 64:
@@ -120,6 +131,12 @@ type DisruptorEngine struct {
 	index     sync.Map // orderID(string) -> *Order (resting); Symbol routes the cancel to its shard
 	mode      string
 	out       chan outMsg
+	// audit, when set, receives every outbound payload (acks/fills) from the
+	// output writers — the disruptor's twin of the mutex path's logMsg("out").
+	// Without it the audit log recorded only inbound traffic in this mode. It
+	// is invoked off the matcher goroutines and must be non-blocking (the
+	// JSONLLogger's channel send is).
+	audit func(any)
 }
 
 type outMsg struct {
@@ -196,6 +213,9 @@ func (de *DisruptorEngine) outputLoop() {
 	for msg := range de.out {
 		if msg.client == nil {
 			continue
+		}
+		if de.audit != nil {
+			de.audit(msg.payload)
 		}
 		if err := msg.client.SendJSON(msg.payload); err != nil {
 			// connection gone — drop; the run's correctness comes from the

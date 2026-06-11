@@ -82,7 +82,7 @@ Terminal 1:
 
 ```bash
 cd examples/stub-engine
-go run . --addr :8080 --events engine-events.jsonl
+go run . --addr :8080 --engine mutex --events engine-events.jsonl
 ```
 
 Terminal 2:
@@ -354,17 +354,23 @@ run_id: run_local_001
 bots: 100
 orders_sent: 30000
 acks_received: 30000
-fills_received: 15000
+fills_received: 24380
 timeouts: 0
 connect_errors: 0
-tps: 500.0
+tps: 501.7
 peak_tps: 540
-p50: 1.2ms
-p90: 3.8ms
-p99: 11.4ms
+p50: 0.3ms
+p90: 0.6ms
+p99: 1.5ms
 events_out: events.jsonl
 outputs_out: contestant_outputs.jsonl
 ```
+
+The numbers above were measured with the `--engine mutex` core the quickstart
+launches — engine choice and quoted numbers must stay paired: at this unpooled
+100-connection shape the mutex core measures *better* than the disruptor,
+which earns its keep under the pooled, high-rate shapes the demo scripts use
+(see [docs/PROFILING.md](docs/PROFILING.md)).
 
 `tps` is the average; `peak_tps` is the busiest 1-second window (the brief's
 "max TPS before failure"). The fleet sends a realistic mix — **limit** orders

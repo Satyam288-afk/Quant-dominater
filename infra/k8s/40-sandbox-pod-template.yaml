@@ -36,6 +36,11 @@ spec:
   containers:
     - name: engine
       image: REGISTRY/iicpc-sandbox:RUN_ID # built by the sandbox-runner from the artifact
+      # --events "" : the engine's default audit path is a RELATIVE file, which
+      # log.Fatal's on this read-only rootfs. The authoritative run record is
+      # the fleet's own events.jsonl; the engine-side audit is best-effort and
+      # would risk filling the 64Mi tmpfs on long runs anyway.
+      args: ["--addr", ":8080", "--events", ""]
       ports:
         - { name: engine, containerPort: 8080 }
       securityContext:

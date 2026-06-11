@@ -80,11 +80,11 @@ echo "[2/8] starting stub engine on :8080"
 if command -v lsof >/dev/null 2>&1; then
   lsof -ti tcp:8080 2>/dev/null | xargs kill -9 2>/dev/null || true
 fi
-(
-  cd "$ENGINE_DIR"
-  # disruptor engine: measured p99 2.00ms vs mutex 4.95ms at canonical load.
-  go run . --addr :8080 --engine "${STUB_ENGINE:-disruptor}" --events "$RUN_DIR/engine-events.jsonl"
-) &
+# disruptor engine: measured p99 2.00ms vs mutex 4.95ms at canonical load.
+# Build then exec directly so $! is the engine itself and cleanup's SIGTERM
+# actually reaches it (a `( cd ...; go run . ) &` subshell swallowed it).
+(cd "$ENGINE_DIR" && go build -o "$RUN_DIR/stub-engine" .)
+"$RUN_DIR/stub-engine" --addr :8080 --engine "${STUB_ENGINE:-disruptor}" --events "$RUN_DIR/engine-events.jsonl" &
 ENGINE_PID=$!
 for _ in {1..50}; do
   if curl -fsS http://localhost:8080/health >/dev/null 2>&1; then

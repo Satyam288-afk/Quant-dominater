@@ -33,7 +33,7 @@ spec:
                 --bots "$BOTS_PER_POD" \
                 --orders-per-sec "$ORDERS_PER_SEC" \
                 --duration-sec "$DURATION_SEC" \
-                --ws-connections 64 \
+                --ws-connections 8 \
                 --pod-index "${JOB_COMPLETION_INDEX:-0}" \
                 --seed 42 \
                 --symbols "$SYMBOLS" \

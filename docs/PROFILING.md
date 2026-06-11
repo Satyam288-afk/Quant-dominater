@@ -124,9 +124,13 @@ then mutex, then the network, and we took each win that was real and safe.
 ## Bonus: a lock-free Disruptor engine (`--engine disruptor`)
 
 "Could a different *architecture* beat the locks entirely?" is a fair question,
-so the engine ships a second, opt-in matching core
+so the engine ships a second matching core
 ([`examples/stub-engine/disruptor.go`](../examples/stub-engine/disruptor.go)) in
-the LMAX-Disruptor style — the default stays the proven sharded-mutex one:
+the LMAX-Disruptor style. The binary's default remains the sharded-mutex core
+(`--engine mutex`); the demo scripts launch the disruptor (`STUB_ENGINE=mutex`
+reverts) because at their pooled load shape it measured ~2× lower p99 — at
+*unpooled* shapes (the README quickstart) the mutex core measures better, so
+engine choice and quoted numbers always travel together:
 
 - **Lock-free MPSC ring buffer** per shard (LMAX claim/publish with per-slot
   atomic sequences): many WS goroutines publish, one matcher consumes.
@@ -267,8 +271,13 @@ instrument:
    removal with pointer-identity verification.
 5. **Demo default: `--engine disruptor`** — at the exact canonical load the
    lock-free engine measured p50/p99 0.48/2.00ms vs mutex 1.52/4.95ms. The
-   demos now default to it (`STUB_ENGINE=mutex` flips back); cost is ~55% of
-   one core of idle backoff-timer churn, fine on a bench host.
+   demos now default to it (`STUB_ENGINE=mutex` flips back). A round-3 A/B
+   then resized `disruptorShards` 32 → 8: on a 12-core host 32 busy-spin
+   matchers oversubscribed the cores, so fewer shards cut idle cost from ~53%
+   to ~30% of a core AND improved high-load p99 ~3× (5.1 → 1.6ms) with the
+   canonical numbers unchanged — the lever was the shard count, not the wait
+   strategy (an escalating-sleep tier was measured and rejected: it taxed the
+   canonical p50/p99 ~40%).
 6. **Ingester dedup 2.7×** — the idempotency gate paid SipHash twice (identity
    hash + the `HashSet`'s own). ahash identity + a pass-through hasher on the
    already-uniform u64 keys: 10.6 → 29.0 Mevents/s, full-field identity

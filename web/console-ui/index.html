@@ -944,8 +944,8 @@
       });
 
       loadExampleButton.addEventListener("click", () => {
-        logEvent("example ZIP is created by scripts/run-platform-demo.sh; choose .runs/platform-demo/stub-engine.zip or zip examples/stub-engine");
-        formStatus.textContent = "Choose .runs/platform-demo/stub-engine.zip, or run zip -qr .runs/platform-demo/stub-engine.zip examples/stub-engine contents.";
+        logEvent("example ZIP is created by scripts/run-console-stack.sh; choose .runs/console-stack/stub-engine.zip or zip examples/stub-engine");
+        formStatus.textContent = "Choose .runs/console-stack/stub-engine.zip (created by the console stack), or run zip -qr stub-engine.zip examples/stub-engine contents.";
       });
 
       document.querySelector("#network-egress").checked = false;

@@ -259,8 +259,12 @@ async fn main() -> Result<()> {
     if pool_size > 0 {
         let n_conns = pool_size.min(args.bots);
         eprintln!("pooling {} bots over {} ws connections", args.bots, n_conns);
+        // Stamp TTL = ack timeout + grace: after that an order is already a
+        // timeout, so its wire stamp can never be consumed and gets swept.
+        let stamp_ttl = Duration::from_millis(args.ack_timeout_ms) + Duration::from_secs(1);
         let mut pool =
-            pool::ConnectionPool::connect(&args.target, n_conns, args.bots, pod_offset).await?;
+            pool::ConnectionPool::connect(&args.target, n_conns, args.bots, pod_offset, stamp_ttl)
+                .await?;
         reconnects_handle = Some(pool.reconnects_handle());
         let wire_sent = pool.wire_sent_handle();
         for bot_index in 0..args.bots {

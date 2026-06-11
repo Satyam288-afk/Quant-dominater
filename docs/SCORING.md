@@ -45,7 +45,9 @@ yields a neutral `100` — a sampling miss never unfairly penalises an engine.
 **32.8% CPU / 21 MB → resource_score = 100** (genuinely efficient, *earned* not
 assumed); at 600 bots on one symbol it used **163% CPU (~1.6 cores) → 25** (CPU
 capped at 100% → `(100-50)*1.5 = 75` penalty). The term demonstrably moves with
-real load.
+real load. (Those numbers are the mutex core; the disruptor core idles at ~30%
+of a core after its shard count was sized to the host — still under the 50%
+knee, so it pays no idle penalty either.)
 
 ## Local Slice Metrics
 

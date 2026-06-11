@@ -66,7 +66,9 @@ pub fn stability_score(orders_sent: i64, timeouts: i64, connect_errors: i64) -> 
 }
 
 pub fn resource_efficiency_score(cpu_pct: Option<f64>, mem_mb: Option<f64>) -> f64 {
-    // Until sandbox sampling lands we keep the same default as the Go scorer.
+    // The sandbox samples real peak usage (resource.json). None / <= 0 means
+    // "not measured" -> neutral 100, so a sampling miss never penalises an
+    // engine. Same curve as the Go scorer (scoring.go resourceScore).
     let cpu = match cpu_pct {
         Some(v) if v > 0.0 => v.min(100.0),
         _ => return 100.0,

@@ -507,6 +507,14 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) orders(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
+	// The REST path drives the mutex engine synchronously; in disruptor mode
+	// s.engine is nil and the disruptor's async pipeline has no request/reply
+	// slot for HTTP. Refuse cleanly instead of dereferencing nil.
+	if s.engine == nil {
+		http.Error(w, "REST /orders is only served in --engine mutex mode; use the WebSocket API", http.StatusNotImplemented)
+		return
+	}
+
 	var raw json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -754,6 +762,11 @@ func main() {
 	switch *engineKind {
 	case "disruptor":
 		de := NewDisruptorEngine(*mode)
+		if logger != nil {
+			// Outbound audit parity with the mutex path: without this hook the
+			// disruptor's audit log silently recorded inbound traffic only.
+			de.audit = func(v any) { server.logMsg("out", "ws", v) }
+		}
 		de.Start()
 		server.disruptor = de
 	case "mutex", "":

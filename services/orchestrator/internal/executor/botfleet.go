@@ -41,12 +41,7 @@ func (b *BotFleet) Run(ctx context.Context, run *model.BenchmarkRun, endpoint st
 	if symbols < 1 {
 		symbols = 1
 	}
-	output := runLoggedCommand(
-		ctx,
-		run,
-		b.repoRoot,
-		"cargo",
-		"run", "-p", "bot-fleet", "--bin", "bot-fleet", "--",
+	fleetArgs := []string{
 		"--target", endpoint,
 		"--bots", strconv.Itoa(run.Config.BotCount),
 		"--orders-per-sec", strconv.Itoa(run.Config.RatePerBot),
@@ -61,7 +56,21 @@ func (b *BotFleet) Run(ctx context.Context, run *model.BenchmarkRun, endpoint st
 		"--cancel-per-mille", "100",
 		"--events-out", eventsOut,
 		"--outputs-out", outputsOut,
-	)
+		// Telemetry belongs with the run's artifacts. Without this flag the
+		// fleet's default wrote telemetry.jsonl into the REPO ROOT (cwd of the
+		// spawn), where concurrent runs clobbered each other's file.
+		"--telemetry-out", filepath.Join(run.ArtifactDir, "telemetry.jsonl"),
+	}
+	// Prefer the pre-built release fleet: a console-triggered run must not pay
+	// a cargo compile (minutes, on a cold cache) inside the judged pipeline.
+	// Fall back to cargo run only when the binary has not been built yet.
+	command := filepath.Join(b.repoRoot, "target", "release", "bot-fleet")
+	args := fleetArgs
+	if _, err := os.Stat(command); err != nil {
+		command = "cargo"
+		args = append([]string{"run", "-p", "bot-fleet", "--bin", "bot-fleet", "--"}, fleetArgs...)
+	}
+	output := runLoggedCommand(ctx, run, b.repoRoot, command, args...)
 	if output.Err != nil {
 		return nil, fmt.Errorf("bot fleet failed: %w", output.Err)
 	}
@@ -134,25 +143,42 @@ func splitOutputs(outputsPath, artifactDir string) error {
 	}
 	defer cancels.Close()
 
+	// Buffered writers: one write syscall per line on a high-TPS run added
+	// ~1s of dead time to the pipeline.
+	ackW := bufio.NewWriterSize(acks, 1<<16)
+	fillW := bufio.NewWriterSize(fills, 1<<16)
+	cancelW := bufio.NewWriterSize(cancels, 1<<16)
+
 	scanner := bufio.NewScanner(in)
 	for scanner.Scan() {
 		line := scanner.Bytes()
+		var w *bufio.Writer
 		switch outputKind(line) {
 		case "ack":
-			if _, err := acks.Write(append(line, '\n')); err != nil {
-				return err
-			}
+			w = ackW
 		case "fill":
-			if _, err := fills.Write(append(line, '\n')); err != nil {
-				return err
-			}
+			w = fillW
 		case "cancel":
-			if _, err := cancels.Write(append(line, '\n')); err != nil {
-				return err
-			}
+			w = cancelW
+		default:
+			continue
+		}
+		if _, err := w.Write(line); err != nil {
+			return err
+		}
+		if err := w.WriteByte('\n'); err != nil {
+			return err
 		}
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	for _, w := range []*bufio.Writer{ackW, fillW, cancelW} {
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func outputKind(line []byte) string {
