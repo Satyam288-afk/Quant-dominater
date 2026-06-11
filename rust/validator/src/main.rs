@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -15,6 +16,25 @@ mod replay;
 
 use edge_cases::ActualFill;
 use replay::EventKind;
+
+/// Interns repeated client_order_ids (the fleet emits `bot_NN_NNNNNN` strings
+/// hundreds of thousands of times) so the arrival map holds one `Arc<str>`
+/// allocation per distinct id instead of an owned `String` per occurrence.
+#[derive(Default)]
+struct Interner {
+    pool: HashSet<Arc<str>>,
+}
+
+impl Interner {
+    fn intern(&mut self, s: &str) -> Arc<str> {
+        if let Some(existing) = self.pool.get(s) {
+            return Arc::clone(existing);
+        }
+        let arc: Arc<str> = Arc::from(s);
+        self.pool.insert(Arc::clone(&arc));
+        arc
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(about = "Replay benchmark inputs through the reference orderbook and compare fills")]
@@ -55,10 +75,13 @@ fn main() -> Result<()> {
     let arrival_seq = read_arrival_order(&args.contestant_outputs)?;
     let events = replay::order_by_engine_seq(events, &arrival_seq);
     let expected: Vec<Fill> = replay::replay_expected_fills(&events, args.shards);
-    let (raw_actual, deduped_actual) = read_actual_fills(&args.contestant_outputs)?;
+    // A single materialised Vec of fills in file order. `deduped_idx` indexes
+    // into it in dedup/seq order, so we never hold a second full copy of every
+    // fill (the working set is multi-GB at 10M fills otherwise).
+    let (actual, deduped_idx) = read_actual_fills(&args.contestant_outputs)?;
 
-    let violations = edge_cases::detect(&events, &raw_actual, &deduped_actual);
-    let result = compare::compare(run_id, &expected, &deduped_actual, &violations);
+    let violations = edge_cases::detect(&events, &actual, &deduped_idx);
+    let result = compare::compare(run_id, &expected, &actual, &deduped_idx, &violations);
     println!("{}", serde_json::to_string_pretty(&result)?);
 
     if !result["valid"].as_bool().unwrap_or(false) {
@@ -67,11 +90,16 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn read_actual_fills(path: &PathBuf) -> Result<(Vec<ActualFill>, Vec<ActualFill>)> {
+/// Reads every fill from contestant_outputs into ONE Vec in file order, and a
+/// parallel `Vec<usize>` of indices selecting the deduped subset (in the same
+/// dedup/seq order the old `deduped` Vec had). The single Vec serves both the
+/// raw-order INCONSISTENT_FILL by_seq check and the deduped checks/diff, so we
+/// never materialise a second full copy of every fill.
+fn read_actual_fills(path: &PathBuf) -> Result<(Vec<ActualFill>, Vec<usize>)> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let reader = BufReader::new(file);
-    let mut raw = Vec::new();
-    let mut deduped = Vec::new();
+    let mut fills = Vec::new();
+    let mut deduped_idx = Vec::new();
     let mut seen_engine_seq = HashSet::new();
     let mut seen_fill_key = HashSet::new();
 
@@ -88,37 +116,36 @@ fn read_actual_fills(path: &PathBuf) -> Result<(Vec<ActualFill>, Vec<ActualFill>
 
         let fill: Fill = serde_json::from_value(fill_value.clone())
             .with_context(|| format!("decode fill at line {}", line_no + 1))?;
+        let engine_seq = fill.engine_seq;
 
-        raw.push(ActualFill {
-            engine_seq: fill.engine_seq,
-            fill: fill.without_engine_seq(),
-        });
-
-        if let Some(engine_seq) = fill.engine_seq {
-            if !seen_engine_seq.insert(engine_seq) {
-                continue;
-            }
+        let is_new = if let Some(engine_seq) = engine_seq {
+            seen_engine_seq.insert(engine_seq)
         } else {
             let key = format!(
                 "{}|{}|{}|{}",
                 fill.buy_order_id, fill.sell_order_id, fill.price, fill.qty
             );
-            if !seen_fill_key.insert(key) {
-                continue;
-            }
-        }
+            seen_fill_key.insert(key)
+        };
 
-        deduped.push(ActualFill {
-            engine_seq: fill.engine_seq,
+        let idx = fills.len();
+        fills.push(ActualFill {
+            engine_seq,
             fill: fill.without_engine_seq(),
         });
+        if is_new {
+            deduped_idx.push(idx);
+        }
     }
 
-    if deduped.iter().all(|f| f.engine_seq.is_some()) {
-        deduped.sort_by_key(|f| f.engine_seq);
+    // Match the legacy deduped ordering: a stable sort by engine_seq when every
+    // deduped fill carries one (sort_by_key is stable, so first-seen ties keep
+    // their relative order — byte-identical to the old `deduped.sort_by_key`).
+    if deduped_idx.iter().all(|&i| fills[i].engine_seq.is_some()) {
+        deduped_idx.sort_by_key(|&i| fills[i].engine_seq);
     }
 
-    Ok((raw, deduped))
+    Ok((fills, deduped_idx))
 }
 
 /// Build a map of `client_order_id -> engine_seq` from every ack the contestant
@@ -127,10 +154,11 @@ fn read_actual_fills(path: &PathBuf) -> Result<(Vec<ActualFill>, Vec<ActualFill>
 /// request, so this map is the engine's authoritative *arrival* sequence, which
 /// the replay uses to reconstruct the true processing order under concurrency.
 /// New-order and cancel ids never collide, so one map orders both.
-fn read_arrival_order(path: &PathBuf) -> Result<HashMap<String, u64>> {
+fn read_arrival_order(path: &PathBuf) -> Result<HashMap<Arc<str>, u64>> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let reader = BufReader::new(file);
-    let mut arrival_seq = HashMap::new();
+    let mut arrival_seq: HashMap<Arc<str>, u64> = HashMap::new();
+    let mut interner = Interner::default();
 
     for (line_no, line) in reader.lines().enumerate() {
         let line = line.with_context(|| format!("read {}:{}", path.display(), line_no + 1))?;
@@ -149,7 +177,11 @@ fn read_arrival_order(path: &PathBuf) -> Result<HashMap<String, u64>> {
             continue;
         };
         // First ack wins (a re-ack would only ever be a duplicate delivery).
-        arrival_seq.entry(coid.to_string()).or_insert(seq);
+        // Intern the id only on first sight so the map holds one Arc<str>
+        // allocation per distinct id instead of an owned String per occurrence.
+        if !arrival_seq.contains_key(coid) {
+            arrival_seq.insert(interner.intern(coid), seq);
+        }
     }
 
     Ok(arrival_seq)

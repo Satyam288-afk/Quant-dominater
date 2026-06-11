@@ -37,7 +37,11 @@ spec:
             - --advertise-kafka-addr=internal://redpanda.iicpc.svc.cluster.local:9092
             - --rpc-addr=0.0.0.0:33145
             - --mode=dev-container
-            - --smp=1
+            # Match the cpu:2 limit so the 4 partitions actually spread across
+            # both cores. This is still ONE broker (single point of failure /
+            # ceiling for the telemetry plane); true horizontal scale needs the
+            # Redpanda Operator for a multi-broker cluster — not attempted here.
+            - --smp=2
             - --default-log-level=warn
           ports:
             - { name: kafka, containerPort: 9092 }

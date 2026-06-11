@@ -100,11 +100,27 @@ func (b *Board) refresh(ctx context.Context) {
 		return
 	}
 
+	// Fetch every team's scorecard in a single pipelined round-trip instead of
+	// one blocking HGetAll per team. At many teams the old serial loop issued
+	// thousands of sequential round-trips that overran the poll tick. We queue
+	// the HGetAll commands in ZRevRange order, Exec once, then read each result
+	// in that same order so the snapshot ordering is unchanged. Exec returns an
+	// error if any command failed; we deliberately ignore it and inspect each
+	// command individually, matching the old behaviour where a per-team error or
+	// empty scorecard simply skipped applyScorecard for that team.
+	pipe := b.rdb.Pipeline()
+	cards := make([]*redis.MapStringStringCmd, len(ranked))
+	for i, z := range ranked {
+		team, _ := z.Member.(string)
+		cards[i] = pipe.HGetAll(rctx, scorecardKey(team))
+	}
+	_, _ = pipe.Exec(rctx)
+
 	entries := make([]board.Entry, 0, len(ranked))
-	for _, z := range ranked {
+	for i, z := range ranked {
 		team, _ := z.Member.(string)
 		entry := board.Entry{TeamID: team, Score: z.Score}
-		if card, err := b.rdb.HGetAll(rctx, scorecardKey(team)).Result(); err == nil && len(card) > 0 {
+		if card, err := cards[i].Result(); err == nil && len(card) > 0 {
 			applyScorecard(&entry, card)
 		}
 		if entry.UpdatedAt.IsZero() {

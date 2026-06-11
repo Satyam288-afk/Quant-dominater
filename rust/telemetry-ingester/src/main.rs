@@ -60,8 +60,9 @@ struct Args {
     #[arg(long, env = "KAFKA_GROUP_ID", default_value = "telemetry-ingester")]
     kafka_group_id: String,
 
-    /// Optional Timescale connection string. When set, aggregates are also
-    /// written to the `metrics_1s` hypertable. Requires --features timescale.
+    /// Optional Timescale connection string. When set, raw events are COPYed
+    /// into the `metrics_raw` hypertable (the `metrics_1s` continuous
+    /// aggregate rolls them up server-side). Requires --features timescale.
     #[arg(long, env = "TIMESCALE_URL", default_value = "")]
     timescale_url: String,
 

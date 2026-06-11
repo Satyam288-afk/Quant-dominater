@@ -19,11 +19,12 @@ pub struct ActualFill {
 /// Detectors that look only at events.jsonl + contestant_outputs.jsonl.
 /// Returns the ordered list of violations; the caller decides which becomes
 /// the primary `reason`.
-pub fn detect(
-    events: &[Event],
-    raw_actual: &[ActualFill],
-    deduped_actual: &[ActualFill],
-) -> Vec<Violation> {
+///
+/// `fills` is the single materialised Vec of every reported fill in file
+/// (raw) order; `deduped_idx` selects the deduped subset (in dedup/seq order)
+/// by index into `fills`, so no second full copy of the fills is held.
+pub fn detect(events: &[Event], fills: &[ActualFill], deduped_idx: &[usize]) -> Vec<Violation> {
+    let deduped = || deduped_idx.iter().map(|&i| &fills[i]);
     let mut out = Vec::new();
 
     // Known order ids and remaining qty per id (from new_order events). Cancels
@@ -44,7 +45,7 @@ pub fn detect(
     // share an engine_seq but DISAGREE on the trade (buy/sell/price/qty) — that
     // means the engine emitted an inconsistent execution report. Only flag that.
     let mut by_seq: HashMap<u64, &Fill> = HashMap::new();
-    for entry in raw_actual {
+    for entry in fills {
         let Some(seq) = entry.engine_seq else {
             continue;
         };
@@ -75,7 +76,7 @@ pub fn detect(
     // OUT_OF_ORDER_SEQ: engine_seq must be monotonically non-decreasing.
     let mut last_seq: Option<u64> = None;
     let mut ooo_first: Option<(u64, u64)> = None;
-    for entry in deduped_actual {
+    for entry in deduped() {
         if let Some(s) = entry.engine_seq {
             if let Some(prev) = last_seq {
                 if s < prev {
@@ -101,7 +102,7 @@ pub fn detect(
     let mut unknown_id: Option<String> = None;
     let mut overfill: Option<(String, i64, i64)> = None;
     let mut bad_qty: Option<(String, i64)> = None;
-    for entry in deduped_actual {
+    for entry in deduped() {
         let f = &entry.fill;
         // A fill qty must be positive. A zero/negative qty is malformed in its
         // own right, and a negative one would also corrupt the cumulative
@@ -210,11 +211,17 @@ mod tests {
         }
     }
 
+    /// In these fixtures every fill is unique, so the deduped subset is the
+    /// whole Vec in order — the identity index list.
+    fn all_idx(fills: &[ActualFill]) -> Vec<usize> {
+        (0..fills.len()).collect()
+    }
+
     #[test]
     fn flags_unknown_order() {
         let events = vec![order("a", 5)];
         let actual = vec![fill("a", "ghost", 1, Some(1))];
-        let v = detect(&events, &actual, &actual);
+        let v = detect(&events, &actual, &all_idx(&actual));
         assert!(v.iter().any(|x| x.reason == "UNKNOWN_ORDER_FILL"));
     }
 
@@ -222,7 +229,7 @@ mod tests {
     fn flags_overfill() {
         let events = vec![order("a", 5), order("b", 5)];
         let actual = vec![fill("a", "b", 6, Some(1))];
-        let v = detect(&events, &actual, &actual);
+        let v = detect(&events, &actual, &all_idx(&actual));
         assert!(v.iter().any(|x| x.reason == "PARTIAL_FILL_OVER_QTY"));
     }
 
@@ -230,7 +237,7 @@ mod tests {
     fn flags_out_of_order_seq() {
         let events = vec![order("a", 5), order("b", 5)];
         let actual = vec![fill("a", "b", 1, Some(2)), fill("a", "b", 1, Some(1))];
-        let v = detect(&events, &actual, &actual);
+        let v = detect(&events, &actual, &all_idx(&actual));
         assert!(v.iter().any(|x| x.reason == "OUT_OF_ORDER_SEQ"));
     }
 
@@ -238,7 +245,7 @@ mod tests {
     fn flags_non_positive_fill_qty() {
         let events = vec![order("a", 5), order("b", 5)];
         let actual = vec![fill("a", "b", 0, Some(1))];
-        let v = detect(&events, &actual, &actual);
+        let v = detect(&events, &actual, &all_idx(&actual));
         assert!(v.iter().any(|x| x.reason == "INVALID_FILL_QTY"));
     }
 
@@ -249,7 +256,7 @@ mod tests {
         // and clamped, so the over-fill still surfaces.
         let events = vec![order("a", 5), order("b", 5)];
         let actual = vec![fill("a", "b", 9, Some(1)), fill("a", "b", -4, Some(2))];
-        let v = detect(&events, &actual, &actual);
+        let v = detect(&events, &actual, &all_idx(&actual));
         assert!(v.iter().any(|x| x.reason == "INVALID_FILL_QTY"));
         assert!(v.iter().any(|x| x.reason == "PARTIAL_FILL_OVER_QTY"));
     }
@@ -263,7 +270,7 @@ mod tests {
         ];
         // Pre-fix this overflowed: debug panicked (killing the single-threaded
         // validator → no validation.json), release wrapped silently.
-        let v = detect(&events, &actual, &actual);
+        let v = detect(&events, &actual, &all_idx(&actual));
         assert!(v.iter().any(|x| x.reason == "PARTIAL_FILL_OVER_QTY"));
     }
 }

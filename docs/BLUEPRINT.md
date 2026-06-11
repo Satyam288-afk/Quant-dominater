@@ -77,9 +77,11 @@ Kafka topics (created by `redpanda-init`): `telemetry.events.v1` (4p),
 ## 4. Data stores
 
 **TimescaleDB** (durable, `infra/docker-compose/init-timescale.sql`):
-- `metrics_raw` — hypertable, every telemetry event (raw, for percentiles).
-- `metrics_1s` — per-bot 1s rollups.
-- `run_resource` — CPU/mem samples per run.
+- `metrics_raw` — hypertable, every telemetry event (raw, for percentiles);
+  compressed after 1 h, retained 1 day so the volume cannot fill.
+- `metrics_1s` — continuous aggregate over `metrics_raw` (per-run 1 s rollups,
+  refreshed every 30 s).
+- `run_resource` — CPU/mem samples per run (1-day retention).
 - `scores` — final score per run (read for history/audit).
 
 **Redis** (live, ephemeral — rebuildable from Timescale):

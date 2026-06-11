@@ -34,6 +34,11 @@ type DockerRunner struct {
 	runRoot  string
 	cli      *dockerclient.Client
 
+	// sem bounds concurrent docker builds + container starts so a burst of
+	// requests queues instead of forking unlimited compiles/containers on a
+	// single host. See newBuildSem.
+	sem chan struct{}
+
 	mu         sync.Mutex
 	images     map[string]ImageRef
 	containers map[string]*dockerSandbox
@@ -56,6 +61,7 @@ func NewDockerRunner(repoRoot string, runRoot string) (*DockerRunner, error) {
 		repoRoot:   repoRoot,
 		runRoot:    runRoot,
 		cli:        cli,
+		sem:        newBuildSem(),
 		images:     make(map[string]ImageRef),
 		containers: make(map[string]*dockerSandbox),
 	}, nil
@@ -71,6 +77,12 @@ func (r *DockerRunner) Build(ctx context.Context, req BuildRequest) (ImageRef, e
 	if req.Language == "" {
 		req.Language = "go"
 	}
+
+	// Acquire a build slot before the heavy work (build context + image build);
+	// blocks here so a burst queues instead of forking unlimited concurrent
+	// docker builds. Released when Build returns, on every path.
+	r.sem <- struct{}{}
+	defer func() { <-r.sem }()
 
 	artifactPath, err := resolveLocalArtifact(r.repoRoot, req.ArtifactURI)
 	if err != nil {
@@ -143,6 +155,12 @@ func (r *DockerRunner) Start(ctx context.Context, req StartRequest) (SandboxHand
 	if imageTag == req.ImageRef {
 		return SandboxHandle{}, fmt.Errorf("image_ref must use docker:// scheme")
 	}
+
+	// Acquire a slot before creating/starting the container so a burst queues
+	// instead of forking unlimited concurrent container starts. Released when
+	// Start returns, on every path.
+	r.sem <- struct{}{}
+	defer func() { <-r.sem }()
 
 	sandboxID := fmt.Sprintf("sandbox_%d", time.Now().UnixNano())
 	dir := filepath.Join(r.runRoot, "containers", sandboxID)
@@ -566,7 +584,6 @@ func writeDockerBuildLog(logFile io.Writer, body io.Reader) error {
 			return errors.New(message.ErrorDetail.Message)
 		}
 	}
-	return nil
 }
 
 func tarBuildContext(dir string) (io.Reader, error) {

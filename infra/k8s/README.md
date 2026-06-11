@@ -38,7 +38,10 @@ kubectl kustomize infra/k8s | kubeconform -strict -summary -kubernetes-version 1
   `parallelism × BOTS_PER_POD` bots across nodes (default 8 × 1250 = **10,000**).
   Raise `parallelism` and node count for more.
 - **Ingestion** — `telemetry-ingester` is a Kafka consumer group; its HPA scales
-  replicas up to the topic partition count (4). More partitions → more throughput.
+  replicas up to the topic partition count (4). Partitions parallelize *consumers*,
+  but the single Redpanda broker (`--smp=2`, 2 cores) is the current write ceiling:
+  more partitions help throughput only once the broker is multi-core (done) and,
+  beyond that, multi-node via the Redpanda Operator.
 - **Live API** — `leaderboard-api` is stateless (reads Redis); HPA 2→10 on CPU.
 
 ## Per-run lifecycle (orchestrator-driven)
