@@ -15,6 +15,7 @@ import (
 type LeaderboardPublisher struct {
 	baseURL string
 	client  *http.Client
+	token   string
 }
 
 type leaderboardEntry struct {
@@ -47,6 +48,7 @@ func NewLeaderboardPublisher(baseURL string) *LeaderboardPublisher {
 	return &LeaderboardPublisher{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		client:  &http.Client{Timeout: 5 * time.Second},
+		token:   firstEnv("LEADERBOARD_AUTH_TOKEN", "SERVICE_AUTH_TOKEN"),
 	}
 }
 
@@ -96,6 +98,9 @@ func (p *LeaderboardPublisher) Publish(ctx context.Context, run *model.Benchmark
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if p.token != "" {
+		req.Header.Set("Authorization", "Bearer "+p.token)
+	}
 
 	resp, err := p.client.Do(req)
 	if err != nil {

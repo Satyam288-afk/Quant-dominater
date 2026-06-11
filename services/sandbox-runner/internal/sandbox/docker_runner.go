@@ -29,6 +29,7 @@ const dockerContainerPort = "8080"
 type DockerRunner struct {
 	repoRoot string
 	runRoot  string
+	cli      *dockerclient.Client
 
 	mu         sync.Mutex
 	images     map[string]ImageRef
@@ -41,16 +42,21 @@ type dockerSandbox struct {
 	networkID   string
 }
 
-func NewDockerRunner(repoRoot string, runRoot string) *DockerRunner {
+func NewDockerRunner(repoRoot string, runRoot string) (*DockerRunner, error) {
+	cli, err := newDockerClient()
+	if err != nil {
+		return nil, err
+	}
 	return &DockerRunner{
 		repoRoot:   repoRoot,
 		runRoot:    runRoot,
+		cli:        cli,
 		images:     make(map[string]ImageRef),
 		containers: make(map[string]*dockerSandbox),
-	}
+	}, nil
 }
 
-func (r *DockerRunner) Build(req BuildRequest) (ImageRef, error) {
+func (r *DockerRunner) Build(ctx context.Context, req BuildRequest) (ImageRef, error) {
 	if req.SubmissionID == "" {
 		return ImageRef{}, errors.New("submission_id is required")
 	}
@@ -80,14 +86,8 @@ func (r *DockerRunner) Build(req BuildRequest) (ImageRef, error) {
 	}
 	defer logFile.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
-
-	cli, err := newDockerClient()
-	if err != nil {
-		return ImageRef{}, err
-	}
-	defer cli.Close()
 
 	buildContext, err := tarBuildContext(buildDir)
 	if err != nil {
@@ -101,7 +101,7 @@ func (r *DockerRunner) Build(req BuildRequest) (ImageRef, error) {
 	if dockerBuildKitEnabled() {
 		buildOptions.Version = types.BuilderBuildKit
 	}
-	resp, err := cli.ImageBuild(ctx, buildContext, buildOptions)
+	resp, err := r.cli.ImageBuild(ctx, buildContext, buildOptions)
 	if err != nil {
 		return ImageRef{}, fmt.Errorf("docker image build failed: %w", err)
 	}
@@ -126,7 +126,7 @@ func (r *DockerRunner) Build(req BuildRequest) (ImageRef, error) {
 	return image, nil
 }
 
-func (r *DockerRunner) Start(req StartRequest) (SandboxHandle, error) {
+func (r *DockerRunner) Start(ctx context.Context, req StartRequest) (SandboxHandle, error) {
 	if req.RunID == "" {
 		return SandboxHandle{}, errors.New("run_id is required")
 	}
@@ -162,14 +162,8 @@ func (r *DockerRunner) Start(req StartRequest) (SandboxHandle, error) {
 		args = append(args, "--mode", req.EngineMode)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-
-	cli, err := newDockerClient()
-	if err != nil {
-		return SandboxHandle{}, err
-	}
-	defer cli.Close()
 
 	port, err := nat.NewPort("tcp", dockerContainerPort)
 	if err != nil {
@@ -178,7 +172,7 @@ func (r *DockerRunner) Start(req StartRequest) (SandboxHandle, error) {
 
 	networkPlan := dockerNetworkPlanFor(req.Spec, sandboxID)
 	if networkPlan.isolated {
-		created, err := cli.NetworkCreate(ctx, networkPlan.name, types.NetworkCreate{
+		created, err := r.cli.NetworkCreate(ctx, networkPlan.name, types.NetworkCreate{
 			Driver:   "bridge",
 			Internal: true,
 			Labels: map[string]string{
@@ -200,7 +194,7 @@ func (r *DockerRunner) Start(req StartRequest) (SandboxHandle, error) {
 			networkPlan.name: {},
 		}
 	}
-	createResp, err := cli.ContainerCreate(
+	createResp, err := r.cli.ContainerCreate(
 		ctx,
 		&container.Config{
 			Image: imageTag,
@@ -236,31 +230,28 @@ func (r *DockerRunner) Start(req StartRequest) (SandboxHandle, error) {
 		sandboxID,
 	)
 	if err != nil {
-		_ = dockerRemoveNetwork(networkPlan.id)
+		r.cleanupDockerResources("", networkPlan.id)
 		return SandboxHandle{}, fmt.Errorf("docker container create failed: %w", err)
 	}
 	containerID := createResp.ID
 	if containerID == "" {
-		_ = dockerRemoveNetwork(networkPlan.id)
+		r.cleanupDockerResources("", networkPlan.id)
 		return SandboxHandle{}, errors.New("docker container create returned empty id")
 	}
-	if err := cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
-		_ = dockerStop(containerID)
-		_ = dockerRemoveNetwork(networkPlan.id)
+	if err := r.cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
+		r.cleanupDockerResources(containerID, networkPlan.id)
 		return SandboxHandle{}, fmt.Errorf("docker container start failed: %w", err)
 	}
 
-	hostPort, err := dockerHostPort(containerID, port)
+	hostPort, err := r.dockerHostPort(ctx, containerID, port)
 	if err != nil {
-		_ = dockerStop(containerID)
-		_ = dockerRemoveNetwork(networkPlan.id)
+		r.cleanupDockerResources(containerID, networkPlan.id)
 		return SandboxHandle{}, err
 	}
 
 	healthURL := "http://127.0.0.1:" + hostPort + "/health"
-	if err := waitForHealth(context.Background(), healthURL); err != nil {
-		_ = dockerStop(containerID)
-		_ = dockerRemoveNetwork(networkPlan.id)
+	if err := waitForHealth(ctx, healthURL); err != nil {
+		r.cleanupDockerResources(containerID, networkPlan.id)
 		return SandboxHandle{}, err
 	}
 
@@ -283,7 +274,7 @@ func (r *DockerRunner) Start(req StartRequest) (SandboxHandle, error) {
 	return handle, nil
 }
 
-func (r *DockerRunner) Stop(sandboxID string) error {
+func (r *DockerRunner) Stop(ctx context.Context, sandboxID string) error {
 	r.mu.Lock()
 	container := r.containers[sandboxID]
 	delete(r.containers, sandboxID)
@@ -292,12 +283,19 @@ func (r *DockerRunner) Stop(sandboxID string) error {
 	if container == nil {
 		return errors.New("sandbox not found")
 	}
-	stopErr := dockerStop(container.containerID)
-	networkErr := dockerRemoveNetwork(container.networkID)
+	stopErr := r.dockerStop(ctx, container.containerID)
+	networkErr := r.dockerRemoveNetwork(ctx, container.networkID)
 	if stopErr != nil {
 		return stopErr
 	}
 	return networkErr
+}
+
+func (r *DockerRunner) Close() error {
+	if r.cli == nil {
+		return nil
+	}
+	return r.cli.Close()
 }
 
 func (r *DockerRunner) Get(sandboxID string) (SandboxHandle, bool) {
@@ -330,19 +328,16 @@ func newDockerClient() (*dockerclient.Client, error) {
 	return cli, nil
 }
 
-func dockerHostPort(containerID string, port nat.Port) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func (r *DockerRunner) dockerHostPort(ctx context.Context, containerID string, port nat.Port) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-
-	cli, err := newDockerClient()
-	if err != nil {
-		return "", err
-	}
-	defer cli.Close()
 
 	var lastErr error
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
-		inspect, err := cli.ContainerInspect(ctx, containerID)
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		inspect, err := r.cli.ContainerInspect(ctx, containerID)
 		if err != nil {
 			lastErr = err
 			time.Sleep(100 * time.Millisecond)
@@ -360,17 +355,11 @@ func dockerHostPort(containerID string, port nat.Port) (string, error) {
 	return "", fmt.Errorf("docker returned no port mapping for container %s", containerID)
 }
 
-func dockerStop(containerID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func (r *DockerRunner) dockerStop(ctx context.Context, containerID string) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cli, err := newDockerClient()
-	if err != nil {
-		return err
-	}
-	defer cli.Close()
-
-	if err := cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil && !errdefs.IsNotFound(err) {
+	if err := r.cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil && !errdefs.IsNotFound(err) {
 		return fmt.Errorf("docker container remove failed: %w", err)
 	}
 	return nil
@@ -399,24 +388,27 @@ func dockerNetworkPlanFor(spec SandboxSpec, sandboxID string) dockerNetworkPlan 
 	}
 }
 
-func dockerRemoveNetwork(networkID string) error {
+func (r *DockerRunner) dockerRemoveNetwork(ctx context.Context, networkID string) error {
 	if networkID == "" {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cli, err := newDockerClient()
-	if err != nil {
-		return err
-	}
-	defer cli.Close()
-
-	if err := cli.NetworkRemove(ctx, networkID); err != nil && !errdefs.IsNotFound(err) {
+	if err := r.cli.NetworkRemove(ctx, networkID); err != nil && !errdefs.IsNotFound(err) {
 		return fmt.Errorf("docker network remove failed: %w", err)
 	}
 	return nil
+}
+
+func (r *DockerRunner) cleanupDockerResources(containerID string, networkID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if containerID != "" {
+		_ = r.dockerStop(ctx, containerID)
+	}
+	_ = r.dockerRemoveNetwork(ctx, networkID)
 }
 
 type dockerBuildMessage struct {

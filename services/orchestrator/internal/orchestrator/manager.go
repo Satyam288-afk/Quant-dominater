@@ -169,6 +169,38 @@ func (m *Manager) CancelRun(ctx context.Context, runID string) (*model.Benchmark
 	return run, nil
 }
 
+func (m *Manager) Shutdown(ctx context.Context) {
+	m.mu.Lock()
+	inflight := len(m.cancels)
+	for _, cancel := range m.cancels {
+		cancel()
+	}
+	m.mu.Unlock()
+	if inflight == 0 {
+		return
+	}
+	slog.Info("orchestrator shutdown: cancelling in-flight runs", "count", inflight)
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		m.mu.Lock()
+		remaining := len(m.cancels)
+		m.mu.Unlock()
+		if remaining == 0 {
+			slog.Info("orchestrator shutdown: all runs drained")
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			slog.Warn("orchestrator shutdown grace elapsed with runs still draining", "remaining", remaining)
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 func (m *Manager) BenchmarkEndpoint(ctx context.Context, req model.DirectBenchmarkRequest) (*model.DirectBenchmarkResult, error) {
 	endpoint := strings.TrimSpace(req.EndpointURL)
 	if endpoint == "" {

@@ -103,11 +103,11 @@ async fn main() -> Result<()> {
     let validation: Value =
         serde_json::from_slice(&validation_bytes).context("decoding validation.json")?;
 
-    let valid = validation
+    let mut valid = validation
         .get("valid")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let failure_reason = validation
+    let mut failure_reason = validation
         .get("reason")
         .and_then(Value::as_str)
         .map(|s| s.to_string());
@@ -156,9 +156,9 @@ async fn main() -> Result<()> {
                 if args.timescale_url.is_empty() {
                     return Err(anyhow!("--timescale-url required when --backend=live"));
                 }
-                let run_id = resolved_run_id
-                    .clone()
-                    .ok_or_else(|| anyhow!("--run-id required when --backend=live and validation.json has none"))?;
+                let run_id = resolved_run_id.clone().ok_or_else(|| {
+                    anyhow!("--run-id required when --backend=live and validation.json has none")
+                })?;
                 let m = live::pull_metrics(&args.timescale_url, &run_id)
                     .await
                     .with_context(|| format!("pulling live metrics for run {run_id}"))?;
@@ -169,6 +169,10 @@ async fn main() -> Result<()> {
     };
 
     let run_id = resolved_run_id.unwrap_or_else(|| "unknown".to_string());
+    if valid && metrics.orders_sent <= 0 {
+        valid = false;
+        failure_reason = Some("no benchmark orders produced".to_string());
+    }
 
     let composite: CompositeScore = compose(ScoreInputs {
         valid,
@@ -283,9 +287,9 @@ fn extract_metrics(value: &Value, run_id: &str) -> Option<ExtractedMetrics> {
     }
     // Shape B: telemetry-ingester telemetry-summary.json with `runs` array.
     if let Some(runs) = value.get("runs").and_then(Value::as_array) {
-        let target = runs.iter().find(|r| {
-            r.get("run_id").and_then(Value::as_str) == Some(run_id)
-        });
+        let target = runs
+            .iter()
+            .find(|r| r.get("run_id").and_then(Value::as_str) == Some(run_id));
         if let Some(r) = target.or_else(|| runs.first()) {
             return Some(ExtractedMetrics {
                 p50_ms: number(r, "p50_ms"),

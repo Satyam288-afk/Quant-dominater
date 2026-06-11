@@ -205,6 +205,14 @@ The script uses a private submission index and artifact root under
 orchestrator. This avoids interference from any long-running local orchestrator
 watching the default `.artifacts/submissions/index.json` store.
 
+To exercise the local platform with authenticated mutation calls, set a shared
+token before running the demo. The script forwards the bearer token to the
+submission API, orchestrator, sandbox runner, and leaderboard writer:
+
+```bash
+SERVICE_AUTH_TOKEN=dev-secret ./scripts/run-platform-demo.sh
+```
+
 Expected run artifact shape:
 
 ```text

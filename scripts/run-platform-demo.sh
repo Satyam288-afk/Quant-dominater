@@ -26,6 +26,21 @@ SANDBOX_URL="http://127.0.0.1:$(addr_port "$SANDBOX_ADDR")"
 ORCH_URL="http://127.0.0.1:$(addr_port "$ORCH_ADDR")"
 LEADERBOARD_URL="http://127.0.0.1:$(addr_port "$LEADERBOARD_ADDR")"
 DEMO_LEADERBOARD_STORE="${LEADERBOARD_STORE_PATH:-$DEMO_DIR/leaderboard-store-$DEMO_ID.json}"
+SUBMISSION_AUTH_TOKEN="${SUBMISSION_API_AUTH_TOKEN:-${SERVICE_AUTH_TOKEN:-}}"
+ORCHESTRATOR_AUTH_TOKEN="${ORCHESTRATOR_AUTH_TOKEN:-${SERVICE_AUTH_TOKEN:-}}"
+LEADERBOARD_AUTH_TOKEN="${LEADERBOARD_AUTH_TOKEN:-${SERVICE_AUTH_TOKEN:-}}"
+SUBMISSION_AUTH_ARGS=()
+ORCHESTRATOR_AUTH_ARGS=()
+LEADERBOARD_AUTH_ARGS=()
+if [[ -n "$SUBMISSION_AUTH_TOKEN" ]]; then
+  SUBMISSION_AUTH_ARGS=(-H "Authorization: Bearer $SUBMISSION_AUTH_TOKEN")
+fi
+if [[ -n "$ORCHESTRATOR_AUTH_TOKEN" ]]; then
+  ORCHESTRATOR_AUTH_ARGS=(-H "Authorization: Bearer $ORCHESTRATOR_AUTH_TOKEN")
+fi
+if [[ -n "$LEADERBOARD_AUTH_TOKEN" ]]; then
+  LEADERBOARD_AUTH_ARGS=(-H "Authorization: Bearer $LEADERBOARD_AUTH_TOKEN")
+fi
 
 mkdir -p "$DEMO_DIR"
 rm -f "$DEMO_DIR"/*.log "$DEMO_DIR"/stub-engine.zip "$DEMO_DIR"/submission.json "$DEMO_DIR"/run-created.json "$DEMO_DIR"/run-final.json "$DEMO_DIR"/leaderboard.json "$DEMO_DIR"/leaderboard-store*.json "$DEMO_DIR"/artifacts.json
@@ -150,7 +165,7 @@ wait_health leaderboard-api "$LEADERBOARD_URL"
 wait_health orchestrator "$ORCH_URL"
 
 echo "[3/7] submitting engine artifact"
-curl -fsS -X POST "$SUBMISSION_URL/submissions" \
+curl -fsS "${SUBMISSION_AUTH_ARGS[@]}" -X POST "$SUBMISSION_URL/submissions" \
   -F team_id=demo_team \
   -F language=go \
   -F protocol=ws-json \
@@ -160,17 +175,17 @@ SUBMISSION_ID="$(json_get "$DEMO_DIR/submission.json" submission_id)"
 echo "submission_id=$SUBMISSION_ID"
 
 echo "[4/7] creating benchmark run"
-curl -fsS -X POST "$SUBMISSION_URL/submissions/$SUBMISSION_ID/runs" \
+curl -fsS "${SUBMISSION_AUTH_ARGS[@]}" -X POST "$SUBMISSION_URL/submissions/$SUBMISSION_ID/runs" \
   -H "Content-Type: application/json" \
   -d '{"benchmark_seed":42,"sandbox":{"cpu_limit":"1","memory_limit":"512Mi","network_egress":false},"config":{"bot_count":10,"rate_per_bot":2,"duration_sec":5,"warmup_sec":0}}' \
   > "$DEMO_DIR/run-created.json"
 RUN_ID="$(json_get "$DEMO_DIR/run-created.json" run_id)"
 echo "run_id=$RUN_ID"
-curl -fsS -X POST "$ORCH_URL/runs/$RUN_ID/start" >/dev/null
+curl -fsS "${ORCHESTRATOR_AUTH_ARGS[@]}" -X POST "$ORCH_URL/runs/$RUN_ID/start" >/dev/null
 
 echo "[5/7] waiting for orchestrator to finish"
 for _ in {1..120}; do
-  curl -fsS "$ORCH_URL/runs/$RUN_ID" > "$DEMO_DIR/run-final.json"
+  curl -fsS "${ORCHESTRATOR_AUTH_ARGS[@]}" "$ORCH_URL/runs/$RUN_ID" > "$DEMO_DIR/run-final.json"
   STATUS="$(json_get "$DEMO_DIR/run-final.json" status)"
   echo "status=$STATUS"
   case "$STATUS" in

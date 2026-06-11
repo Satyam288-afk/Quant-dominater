@@ -93,7 +93,9 @@ fn replay_sequential(events: &[Event]) -> Vec<Fill> {
                     fills.extend(produced.into_iter().map(|f| f.without_engine_seq()));
                 }
             }
-            EventKind::Cancel { orig_client_order_id } => {
+            EventKind::Cancel {
+                orig_client_order_id,
+            } => {
                 for book in books.values_mut() {
                     if book.cancel(orig_client_order_id) {
                         break;
@@ -163,7 +165,9 @@ fn replay_sharded(events: &[Event]) -> Vec<Fill> {
                             }
                         }
                     }
-                    EventKind::Cancel { orig_client_order_id } => {
+                    EventKind::Cancel {
+                        orig_client_order_id,
+                    } => {
                         book.cancel(orig_client_order_id);
                     }
                 }
@@ -208,7 +212,15 @@ mod tests {
     use super::*;
     use reference_orderbook::{OrderType, Side};
 
-    fn ev_new(line_no: usize, sym: &str, id: &str, side: Side, price: i64, qty: i64, ts: u64) -> Event {
+    fn ev_new(
+        line_no: usize,
+        sym: &str,
+        id: &str,
+        side: Side,
+        price: i64,
+        qty: i64,
+        ts: u64,
+    ) -> Event {
         Event {
             line_no,
             symbol: sym.to_string(),

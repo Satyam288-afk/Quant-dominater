@@ -27,7 +27,7 @@ func (h *Handler) Build(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	image, err := h.runner.Build(req)
+	image, err := h.runner.Build(r.Context(), req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -43,7 +43,7 @@ func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	handle, err := h.runner.Start(req)
+	handle, err := h.runner.Start(r.Context(), req)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -65,7 +65,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Stop(w http.ResponseWriter, r *http.Request) {
-	if err := h.runner.Stop(r.PathValue("sandbox_id")); err != nil {
+	if err := h.runner.Stop(r.Context(), r.PathValue("sandbox_id")); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}

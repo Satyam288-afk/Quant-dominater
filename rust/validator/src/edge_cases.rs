@@ -34,7 +34,9 @@ pub fn detect(
             EventKind::NewOrder(order) => {
                 placed_qty.insert(order.client_order_id.clone(), order.qty);
             }
-            EventKind::Cancel { orig_client_order_id } => {
+            EventKind::Cancel {
+                orig_client_order_id,
+            } => {
                 cancelled_after_line.insert(orig_client_order_id.clone(), ev.line_no);
             }
         }
@@ -123,13 +125,11 @@ pub fn detect(
     for entry in deduped_actual {
         let f = &entry.fill;
         if cancelled_ids.contains(&f.buy_order_id) || cancelled_ids.contains(&f.sell_order_id) {
-            cancel_race_id = Some(
-                if cancelled_ids.contains(&f.buy_order_id) {
-                    f.buy_order_id.clone()
-                } else {
-                    f.sell_order_id.clone()
-                },
-            );
+            cancel_race_id = Some(if cancelled_ids.contains(&f.buy_order_id) {
+                f.buy_order_id.clone()
+            } else {
+                f.sell_order_id.clone()
+            });
             break;
         }
     }

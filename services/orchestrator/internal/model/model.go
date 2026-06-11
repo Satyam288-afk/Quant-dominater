@@ -109,6 +109,7 @@ type ScoreResult struct {
 	StabilityScore  float64 `json:"stability_score"`
 	ResourceScore   float64 `json:"resource_score"`
 	CorrectnessGate string  `json:"correctness_gate"`
+	FailureReason   string  `json:"failure_reason,omitempty"`
 }
 
 type DirectBenchmarkRequest struct {

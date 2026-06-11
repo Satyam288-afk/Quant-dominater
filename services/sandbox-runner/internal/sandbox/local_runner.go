@@ -45,7 +45,7 @@ func NewLocalRunner(repoRoot string, runRoot string) *LocalRunner {
 	}
 }
 
-func (r *LocalRunner) Build(req BuildRequest) (ImageRef, error) {
+func (r *LocalRunner) Build(ctx context.Context, req BuildRequest) (ImageRef, error) {
 	if req.SubmissionID == "" {
 		return ImageRef{}, errors.New("submission_id is required")
 	}
@@ -78,7 +78,7 @@ func (r *LocalRunner) Build(req BuildRequest) (ImageRef, error) {
 
 	if fileExists(filepath.Join(buildDir, "go.mod")) {
 		_, _ = fmt.Fprintf(logFile, "$ (cd %s && go mod tidy)\n", buildDir)
-		tidyCmd := exec.Command("go", "mod", "tidy")
+		tidyCmd := exec.CommandContext(ctx, "go", "mod", "tidy")
 		tidyCmd.Dir = buildDir
 		tidyCmd.Stdout = logFile
 		tidyCmd.Stderr = logFile
@@ -89,7 +89,7 @@ func (r *LocalRunner) Build(req BuildRequest) (ImageRef, error) {
 
 	binaryPath := filepath.Join(buildDir, "engine")
 	_, _ = fmt.Fprintf(logFile, "$ (cd %s && go build -o %s .)\n", buildDir, binaryPath)
-	buildCmd := exec.Command("go", "build", "-o", binaryPath, ".")
+	buildCmd := exec.CommandContext(ctx, "go", "build", "-o", binaryPath, ".")
 	buildCmd.Dir = buildDir
 	buildCmd.Stdout = logFile
 	buildCmd.Stderr = logFile
@@ -117,7 +117,7 @@ func (r *LocalRunner) Build(req BuildRequest) (ImageRef, error) {
 	return image, nil
 }
 
-func (r *LocalRunner) Start(req StartRequest) (SandboxHandle, error) {
+func (r *LocalRunner) Start(ctx context.Context, req StartRequest) (SandboxHandle, error) {
 	if req.RunID == "" {
 		return SandboxHandle{}, errors.New("run_id is required")
 	}
@@ -183,8 +183,10 @@ func (r *LocalRunner) Start(req StartRequest) (SandboxHandle, error) {
 	}()
 
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", port)
-	if err := waitForHealth(context.Background(), healthURL); err != nil {
-		_ = stopProcess(cmd, done)
+	if err := waitForHealth(ctx, healthURL); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = stopProcess(cleanupCtx, cmd, done)
 		return SandboxHandle{}, err
 	}
 
@@ -205,7 +207,7 @@ func (r *LocalRunner) Start(req StartRequest) (SandboxHandle, error) {
 	return handle, nil
 }
 
-func (r *LocalRunner) Stop(sandboxID string) error {
+func (r *LocalRunner) Stop(ctx context.Context, sandboxID string) error {
 	r.mu.Lock()
 	sandbox := r.sandboxes[sandboxID]
 	delete(r.sandboxes, sandboxID)
@@ -214,7 +216,7 @@ func (r *LocalRunner) Stop(sandboxID string) error {
 	if sandbox == nil {
 		return errors.New("sandbox not found")
 	}
-	return stopProcess(sandbox.cmd, sandbox.done)
+	return stopProcess(ctx, sandbox.cmd, sandbox.done)
 }
 
 func (r *LocalRunner) Get(sandboxID string) (SandboxHandle, bool) {
@@ -274,7 +276,7 @@ func waitForHealth(ctx context.Context, url string) error {
 	}
 }
 
-func stopProcess(cmd *exec.Cmd, done <-chan error) error {
+func stopProcess(ctx context.Context, cmd *exec.Cmd, done <-chan error) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
@@ -289,6 +291,8 @@ func stopProcess(cmd *exec.Cmd, done <-chan error) error {
 	select {
 	case err := <-done:
 		return ignoreExitError(err)
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-time.After(1500 * time.Millisecond):
 		_ = cmd.Process.Kill()
 	}
@@ -296,6 +300,8 @@ func stopProcess(cmd *exec.Cmd, done <-chan error) error {
 	select {
 	case err := <-done:
 		return ignoreExitError(err)
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-time.After(2 * time.Second):
 		return errors.New("timed out waiting for sandbox process to stop")
 	}

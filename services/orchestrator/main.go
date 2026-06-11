@@ -6,8 +6,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"orchestrator/internal/api"
@@ -17,6 +19,9 @@ import (
 )
 
 func main() {
+	serverCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
 	repoRoot, err := resolveRepoRoot()
 	if err != nil {
 		log.Fatal(err)
@@ -60,20 +65,38 @@ func main() {
 		runner.SetLeaderboardPublisher(executor.NewLeaderboardPublisher(leaderboardURL))
 	}
 	if autoStart {
-		runner.StartWorker(context.Background(), pollInterval)
+		runner.StartWorker(serverCtx, pollInterval)
 	}
 
 	handler := api.NewHandler(runner, st)
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux, handler)
+	httpHandler := api.RequireServiceAuth(mux, firstEnv("ORCHESTRATOR_AUTH_TOKEN", "SERVICE_AUTH_TOKEN"))
 
 	addr := os.Getenv("ORCHESTRATOR_ADDR")
 	if addr == "" {
 		addr = ":9300"
 	}
 
-	log.Printf("orchestrator listening on %s repo_root=%s sandbox_runner_url=%s run_timeout=%s auto_start=%t poll_interval=%s", addr, repoRoot, sandboxRunnerURL, runTimeout, autoStart, pollInterval)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	srv := &http.Server{Addr: addr, Handler: httpHandler, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		log.Printf("orchestrator listening on %s repo_root=%s sandbox_runner_url=%s run_timeout=%s auto_start=%t poll_interval=%s", addr, repoRoot, sandboxRunnerURL, runTimeout, autoStart, pollInterval)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("listen: %v", err)
+		}
+	}()
+
+	<-serverCtx.Done()
+	stop()
+	log.Printf("shutdown signal received; stopping worker, draining HTTP, cancelling in-flight runs")
+
+	shutCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutCtx); err != nil {
+		log.Printf("http shutdown: %v", err)
+	}
+	runner.Shutdown(shutCtx)
+	log.Printf("orchestrator drained cleanly")
 }
 
 func envBool(name string, fallback bool) bool {
@@ -134,4 +157,13 @@ func envPath(name string, fallback string) string {
 		return value
 	}
 	return abs
+}
+
+func firstEnv(names ...string) string {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+	}
+	return ""
 }

@@ -50,3 +50,22 @@ func TestScoreUsesWeightedFormula(t *testing.T) {
 		t.Fatalf("score = %v, want 63", got.Score)
 	}
 }
+
+func TestScoreRejectsValidButEmptyBenchmark(t *testing.T) {
+	got := Score(Request{
+		RunID:      "run_1",
+		Config:     BenchmarkRunConfig{BotCount: 10, RatePerBot: 2},
+		Validation: &ValidationResult{Valid: true},
+		Metrics:    &Metrics{},
+	})
+
+	if got.Valid {
+		t.Fatal("score should not remain valid when no benchmark orders were produced")
+	}
+	if got.Score != 0 {
+		t.Fatalf("score = %v, want 0", got.Score)
+	}
+	if got.FailureReason != "no benchmark orders produced" {
+		t.Fatalf("failure reason = %q", got.FailureReason)
+	}
+}

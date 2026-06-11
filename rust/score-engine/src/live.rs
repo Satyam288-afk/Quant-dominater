@@ -127,9 +127,7 @@ pub async fn publish_leaderboard(redis_url: &str, team_id: &str, score: &ScoreJs
     // Always reflect the latest run's score for the team in the global
     // leaderboard. Teams who beat their previous score climb naturally
     // since ZADD overwrites.
-    let _: () = mgr
-        .zadd("leaderboard:global", team_id, score.score)
-        .await?;
+    let _: () = mgr.zadd("leaderboard:global", team_id, score.score).await?;
 
     // Track the team's best score separately so a regression run doesn't
     // demote them on the "personal best" view.
