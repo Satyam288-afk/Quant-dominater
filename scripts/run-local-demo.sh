@@ -44,10 +44,19 @@ done
 
 curl -fsS http://localhost:8080/health
 
+# The fleet is the measuring instrument; build it --release so the headline
+# p50/p99 come from an optimised binary. A debug fleet measured ~2x the p99 tail
+# and ~28x the RSS at saturation purely from its own un-inlined JSON path — i.e.
+# the harness billing its own overhead to the engine under test.
+echo "building fleet + validator (release)"
+(cd "$ROOT_DIR" && cargo build --release -p bot-fleet -p validator --quiet)
+FLEET_BIN="$ROOT_DIR/target/release/bot-fleet"
+VALIDATOR_BIN="$ROOT_DIR/target/release/validator"
+
 echo "running bot fleet (24 bots over 4 ws conns, 4 shared symbols, 5-level price ladder, ~10% market + ~12% cancel orders)"
 (
   cd "$ROOT_DIR"
-  cargo run -p bot-fleet --bin bot-fleet -- \
+  "$FLEET_BIN" \
     --target ws://localhost:8080/ws \
     --bots 24 \
     --orders-per-sec 5 \
@@ -67,7 +76,7 @@ echo "running bot fleet (24 bots over 4 ws conns, 4 shared symbols, 5-level pric
 echo "validating outputs"
 (
   cd "$ROOT_DIR"
-  cargo run -p validator -- \
+  "$VALIDATOR_BIN" \
     --events "$RUN_DIR/events.jsonl" \
     --contestant-outputs "$RUN_DIR/contestant_outputs.jsonl"
 )

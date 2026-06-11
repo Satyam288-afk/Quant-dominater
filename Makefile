@@ -24,7 +24,7 @@ test-rust:
 	cargo test --workspace
 
 bot-fleet:
-	cargo run -p bot-fleet --bin bot-fleet -- --target ws://localhost:8080/ws --bots 100 --orders-per-sec 5 --duration-sec 60 --seed 42
+	cargo run --release -p bot-fleet --bin bot-fleet -- --target ws://localhost:8080/ws --bots 100 --orders-per-sec 5 --duration-sec 60 --seed 42
 
 validator:
 	cargo run -p validator -- --events events.jsonl --contestant-outputs contestant_outputs.jsonl

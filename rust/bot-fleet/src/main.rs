@@ -14,7 +14,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::{sync::mpsc, time::MissedTickBehavior};
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream};
+use tokio_tungstenite::{connect_async_with_config, tungstenite::Message, MaybeTlsStream};
 
 mod pool;
 
@@ -411,9 +411,10 @@ async fn run_bot(
     sink: Arc<dyn TelemetrySink>,
 ) -> Result<BotStats> {
     let bot_id = format!("bot_{}", config.global_bot_index + 1);
-    let (ws_stream, _) = connect_async(config.target.as_str())
-        .await
-        .with_context(|| format!("{bot_id} connect {}", config.target))?;
+    let (ws_stream, _) =
+        connect_async_with_config(config.target.as_str(), Some(pool::ws_config()), false)
+            .await
+            .with_context(|| format!("{bot_id} connect {}", config.target))?;
     // TCP_NODELAY: don't let Nagle buffer small order frames (see pool.rs).
     if let MaybeTlsStream::Plain(tcp) = ws_stream.get_ref() {
         let _ = tcp.set_nodelay(true);
@@ -619,6 +620,14 @@ async fn handle_engine_value(
             // missing (e.g. ack raced the supervisor's insert).
             let wire = wire_sent.lock().unwrap().remove(&client_order_id);
             let bot_side = pending.remove(&client_order_id);
+            // Gate: only an ack that matches an order this bot actually had
+            // outstanding counts. A duplicate re-delivery, or a hostile engine
+            // flooding acks for ids it was never sent, finds neither stamp —
+            // counting it would inflate throughput/stability and grow the
+            // latency + output buffers without bound (a proven OOM lever). Drop.
+            if wire.is_none() && bot_side.is_none() {
+                return Ok(());
+            }
             let latency_ns = wire
                 .map(|sent| recv_instant.saturating_duration_since(sent).as_nanos() as u64)
                 .or_else(|| bot_side.map(|sent| sent.elapsed().as_nanos() as u64))
@@ -714,10 +723,13 @@ async fn handle_engine_message(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let latency_ns = pending
-                .remove(&client_order_id)
-                .map(|sent| sent.elapsed().as_nanos() as u64)
-                .unwrap_or_default();
+            // Gate: drop acks for orders this bot never had outstanding
+            // (duplicate re-delivery or a hostile engine fabricating acks) so
+            // they can't inflate throughput/stability or grow buffers unbounded.
+            let Some(sent) = pending.remove(&client_order_id) else {
+                return Ok(());
+            };
+            let latency_ns = sent.elapsed().as_nanos() as u64;
             stats.acks_received += 1;
             stats.ack_recv_ts_ns.push(recv_ts_ns);
             if latency_ns > 0 {

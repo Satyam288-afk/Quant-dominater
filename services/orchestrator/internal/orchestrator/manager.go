@@ -451,15 +451,33 @@ func (m *Manager) transition(ctx context.Context, run *model.BenchmarkRun, statu
 	return m.store.SaveRun(ctx, run)
 }
 
+// Defense-in-depth load ceilings, mirrored from the submission-api. The values
+// flow straight into the bot-fleet spawn, so clamp them here too in case a run
+// reaches the orchestrator by any path other than the submission API.
+const (
+	maxBotCount    = 5000
+	maxRatePerBot  = 2000
+	maxDurationSec = 300
+)
+
 func normalizeConfig(config *model.BenchmarkRunConfig) {
 	if config.BotCount <= 0 {
 		config.BotCount = 10
 	}
+	if config.BotCount > maxBotCount {
+		config.BotCount = maxBotCount
+	}
 	if config.RatePerBot <= 0 {
 		config.RatePerBot = 2
 	}
+	if config.RatePerBot > maxRatePerBot {
+		config.RatePerBot = maxRatePerBot
+	}
 	if config.DurationSec <= 0 {
 		config.DurationSec = 5
+	}
+	if config.DurationSec > maxDurationSec {
+		config.DurationSec = maxDurationSec
 	}
 	if config.WarmupSec < 0 {
 		config.WarmupSec = 0

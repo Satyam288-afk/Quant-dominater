@@ -100,15 +100,43 @@ pub fn detect(
     let mut sell_filled: HashMap<String, i64> = HashMap::new();
     let mut unknown_id: Option<String> = None;
     let mut overfill: Option<(String, i64, i64)> = None;
+    let mut bad_qty: Option<(String, i64)> = None;
     for entry in deduped_actual {
         let f = &entry.fill;
+        // A fill qty must be positive. A zero/negative qty is malformed in its
+        // own right, and a negative one would also corrupt the cumulative
+        // totals below (a hostile engine could "subtract" its way out of an
+        // over-fill). Flag it and clamp its contribution to 0.
+        if f.qty <= 0 {
+            bad_qty.get_or_insert_with(|| {
+                let id = if f.buy_order_id.is_empty() {
+                    f.sell_order_id.clone()
+                } else {
+                    f.buy_order_id.clone()
+                };
+                (id, f.qty)
+            });
+        }
         for id in [&f.buy_order_id, &f.sell_order_id] {
             if !placed_qty.contains_key(id) {
                 unknown_id.get_or_insert_with(|| id.clone());
             }
         }
-        *buy_filled.entry(f.buy_order_id.clone()).or_insert(0) += f.qty;
-        *sell_filled.entry(f.sell_order_id.clone()).or_insert(0) += f.qty;
+        // saturating_add, not `+=`: a crafted fill qty near i64::MAX must not
+        // panic the (single-threaded) validator in debug nor silently wrap in
+        // release — either would let a hostile engine evade the over-qty check
+        // or kill the correctness gate entirely.
+        let add = f.qty.max(0);
+        let b = buy_filled.entry(f.buy_order_id.clone()).or_insert(0);
+        *b = b.saturating_add(add);
+        let s = sell_filled.entry(f.sell_order_id.clone()).or_insert(0);
+        *s = s.saturating_add(add);
+    }
+    if let Some((id, qty)) = bad_qty {
+        out.push(Violation {
+            reason: "INVALID_FILL_QTY",
+            detail: json!({ "client_order_id": id, "qty": qty }),
+        });
     }
     if let Some(id) = unknown_id {
         out.push(Violation {
@@ -204,5 +232,35 @@ mod tests {
         let actual = vec![fill("a", "b", 1, Some(2)), fill("a", "b", 1, Some(1))];
         let v = detect(&events, &actual, &actual);
         assert!(v.iter().any(|x| x.reason == "OUT_OF_ORDER_SEQ"));
+    }
+
+    #[test]
+    fn flags_non_positive_fill_qty() {
+        let events = vec![order("a", 5), order("b", 5)];
+        let actual = vec![fill("a", "b", 0, Some(1))];
+        let v = detect(&events, &actual, &actual);
+        assert!(v.iter().any(|x| x.reason == "INVALID_FILL_QTY"));
+    }
+
+    #[test]
+    fn negative_qty_cannot_mask_overfill() {
+        // Over-fill "a" by 4, then try to "subtract" it back with a -4 fill so
+        // the cumulative lands on the placed qty. The negative qty is flagged
+        // and clamped, so the over-fill still surfaces.
+        let events = vec![order("a", 5), order("b", 5)];
+        let actual = vec![fill("a", "b", 9, Some(1)), fill("a", "b", -4, Some(2))];
+        let v = detect(&events, &actual, &actual);
+        assert!(v.iter().any(|x| x.reason == "INVALID_FILL_QTY"));
+        assert!(v.iter().any(|x| x.reason == "PARTIAL_FILL_OVER_QTY"));
+    }
+
+    #[test]
+    fn huge_qty_does_not_panic_or_wrap() {
+        let events = vec![order("a", 5), order("b", 5)];
+        let actual = vec![fill("a", "b", i64::MAX, Some(1)), fill("a", "b", 2, Some(2))];
+        // Pre-fix this overflowed: debug panicked (killing the single-threaded
+        // validator → no validation.json), release wrapped silently.
+        let v = detect(&events, &actual, &actual);
+        assert!(v.iter().any(|x| x.reason == "PARTIAL_FILL_OVER_QTY"));
     }
 }

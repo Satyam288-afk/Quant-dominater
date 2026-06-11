@@ -8,7 +8,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream};
+use tokio_tungstenite::{connect_async_with_config, tungstenite::Message, MaybeTlsStream};
 
 /// Reconnect backoff: first retry after this long, doubling up to the cap.
 const RECONNECT_BASE_MS: u64 = 10;
@@ -106,7 +106,7 @@ impl ConnectionPool {
             // Initial connect is still strict: if the engine is unreachable at
             // startup we fail the run (preserves the original semantics). Only
             // DROPS after a successful start are healed by the supervisor.
-            let (ws_stream, _) = connect_async(target)
+            let (ws_stream, _) = connect_async_with_config(target, Some(ws_config()), false)
                 .await
                 .with_context(|| format!("pool connect {}", target))?;
             set_nodelay(&ws_stream);
@@ -162,6 +162,18 @@ impl ConnectionPool {
     }
 }
 
+/// Bound inbound WebSocket frames. Orders/acks/fills are a few hundred bytes;
+/// tungstenite's defaults otherwise let a peer buffer a 64 MiB message
+/// (16 MiB/frame) before we ever parse it, so a hostile engine could pin
+/// gigabytes across many connections. A 256 KiB ceiling is wildly generous for
+/// the contract yet caps what a misbehaving engine can force per connection.
+pub fn ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    let mut cfg = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+    cfg.max_message_size = Some(256 * 1024);
+    cfg.max_frame_size = Some(64 * 1024);
+    cfg
+}
+
 /// tokio leaves Nagle ON by default; a load generator measuring engine latency
 /// must send each order frame immediately rather than letting the kernel
 /// coalesce small writes (the classic trading-path latency fix).
@@ -192,7 +204,8 @@ async fn supervise_connection(
         // Acquire a live stream: reuse the initial socket, else reconnect.
         let stream = match current.take() {
             Some(s) => s,
-            None => match connect_async(&target).await {
+            None => match connect_async_with_config(target.as_str(), Some(ws_config()), false).await
+            {
                 Ok((s, _)) => {
                     set_nodelay(&s);
                     backoff = Duration::from_millis(RECONNECT_BASE_MS);

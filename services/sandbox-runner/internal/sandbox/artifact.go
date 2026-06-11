@@ -152,6 +152,17 @@ ENTRYPOINT ["/engine"]
 	return os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(content), 0o644)
 }
 
+// Untrusted archive limits: a contestant ZIP (capped at 64 MiB on upload) must
+// not be able to exhaust the host's inodes or disk during extraction. Cap the
+// entry count, the per-entry declared compression ratio, and the total
+// uncompressed bytes actually written (a classic zip bomb expands a few MiB to
+// tens of GB).
+const (
+	maxZipEntries    = 10000
+	maxZipRatio      = 200
+	maxZipTotalBytes = 512 << 20 // 512 MiB uncompressed across the whole archive
+)
+
 func unzip(src string, dst string) error {
 	reader, err := zip.OpenReader(src)
 	if err != nil {
@@ -159,6 +170,11 @@ func unzip(src string, dst string) error {
 	}
 	defer reader.Close()
 
+	if len(reader.File) > maxZipEntries {
+		return fmt.Errorf("zip has too many entries (%d > %d)", len(reader.File), maxZipEntries)
+	}
+
+	var total int64
 	for _, file := range reader.File {
 		target := filepath.Join(dst, file.Name)
 		cleanDst, err := filepath.Abs(dst)
@@ -178,6 +194,10 @@ func unzip(src string, dst string) error {
 			}
 			continue
 		}
+		// Cheap screen: reject an entry whose declared ratio is absurd.
+		if file.CompressedSize64 > 0 && file.UncompressedSize64/file.CompressedSize64 > maxZipRatio {
+			return fmt.Errorf("zip entry %q exceeds max compression ratio", file.Name)
+		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
@@ -185,10 +205,16 @@ func unzip(src string, dst string) error {
 		if err != nil {
 			return err
 		}
-		err = copyReaderToFile(srcFile, target, file.FileInfo().Mode())
+		// Hard cap on bytes actually written, so a lying header can't slip the
+		// declared-size screen above. +1 so hitting the cap exactly still trips.
+		written, err := copyReaderToFile(io.LimitReader(srcFile, maxZipTotalBytes-total+1), target, file.FileInfo().Mode())
 		_ = srcFile.Close()
 		if err != nil {
 			return err
+		}
+		total += written
+		if total > maxZipTotalBytes {
+			return fmt.Errorf("zip expands beyond %d bytes; refusing to extract", int64(maxZipTotalBytes))
 		}
 	}
 	return nil
@@ -228,20 +254,22 @@ func copyFile(src string, dst string) error {
 		return err
 	}
 	defer srcFile.Close()
-	return copyReaderToFile(srcFile, dst, info.Mode())
+	_, err = copyReaderToFile(srcFile, dst, info.Mode())
+	return err
 }
 
-func copyReaderToFile(src io.Reader, dst string, mode os.FileMode) error {
+// copyReaderToFile streams src to dst and returns the number of bytes written
+// so callers extracting untrusted archives can enforce a cumulative size cap.
+func copyReaderToFile(src io.Reader, dst string, mode os.FileMode) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
+		return 0, err
 	}
 	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer dstFile.Close()
-	_, err = io.Copy(dstFile, src)
-	return err
+	return io.Copy(dstFile, src)
 }
 
 func fileExists(path string) bool {

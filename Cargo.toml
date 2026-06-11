@@ -9,3 +9,12 @@ members = [
   "rust/telemetry-ingester",
   "rust/validator",
 ]
+
+# The fleet, validator and ingester are the benchmark instrument: build them for
+# the lowest, tightest tail. LTO + a single codegen unit let the optimiser inline
+# across crate boundaries (the per-message JSON/metric path spans bench-core).
+# panic=abort is deliberately NOT set: the fleet relies on tokio catching a
+# per-bot task panic as a JoinError so one bad message can't sink the whole run.
+[profile.release]
+lto = true
+codegen-units = 1

@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"archive/zip"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,5 +112,58 @@ func TestUnzipRejectsTraversal(t *testing.T) {
 	err = unzip(src, filepath.Join(t.TempDir(), "out"))
 	if err == nil || !strings.Contains(err.Error(), "escapes build context") {
 		t.Fatalf("expected zip traversal error, got %v", err)
+	}
+}
+
+func TestUnzipRejectsZipBomb(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "bomb.zip")
+	file, err := os.Create(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(file)
+	w, err := zw.Create("bomb.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 4 MiB of zeros deflates to a few KiB — a ratio far above the cap.
+	if _, err := w.Write(make([]byte, 4<<20)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	err = unzip(src, filepath.Join(t.TempDir(), "out"))
+	if err == nil || !strings.Contains(err.Error(), "compression ratio") {
+		t.Fatalf("expected zip-bomb rejection, got %v", err)
+	}
+}
+
+func TestUnzipRejectsTooManyEntries(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "many.zip")
+	file, err := os.Create(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(file)
+	for i := 0; i < maxZipEntries+1; i++ {
+		if _, err := zw.Create(fmt.Sprintf("f%d.txt", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	err = unzip(src, filepath.Join(t.TempDir(), "out"))
+	if err == nil || !strings.Contains(err.Error(), "too many entries") {
+		t.Fatalf("expected too-many-entries rejection, got %v", err)
 	}
 }

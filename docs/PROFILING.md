@@ -304,6 +304,40 @@ harness's own bookkeeping on the measurement path** — and a benchmarking
 platform that finds and fixes its own instrument error is worth more than one
 that optimizes its engine into the noise.
 
+## Round 4 — the instrument's own build, and what *still* doesn't move the needle
+
+A fresh multi-angle sweep found one more instrument-error class — this time not
+in the code but in *how it was built for the demo*:
+
+1. **The headline demo numbers came from a `--release`-less fleet.** The
+   saturation table in [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md) always used
+   `target/release/bot-fleet`, but the *demo* scripts (`run-local-demo.sh`,
+   `run-chaos-demo.sh`) and the `bot-fleet` make target launched the load
+   generator via `cargo run` / `target/debug`. A debug fleet's un-inlined
+   per-message JSON path measured **~2× the saturation p99 (8.2-9.6 vs
+   4.2-4.3 ms) and ~28× the RSS (1131 vs 40 MB)** — the allocator/GC churn of
+   the *instrument* bunching the tail it was supposed to measure. The scripts
+   now build and exec the release binary; the canonical demo p99 tightened to
+   ~0.4 ms with no engine change.
+2. **`[profile.release]` LTO + `codegen-units = 1`** (workspace `Cargo.toml`).
+   Lets the optimiser inline the per-message metric/JSON path across the
+   bench-core ↔ fleet crate boundary. `panic = abort` was deliberately **not**
+   set: the fleet relies on tokio catching a per-bot task panic as a `JoinError`
+   so one malformed engine message can't sink the whole run (see the hostile-
+   engine hardening in [SECURITY_SANDBOX.md](SECURITY_SANDBOX.md)).
+
+**What Round 4 killed** (each measured end-to-end and rejected, reinforcing the
+floor): a faster engine JSON decode (`GOEXPERIMENT=jsonv2` was 2.1× in a
+micro-bench but pure noise e2e — decode is ~3% of the engine's 52 µs/order),
+`simd-json` on the fleet inbound path (4.2× on the DOM micro-bench, invisible
+against `sys`-time once the build is release), `mimalloc` on the fleet (neutral
+at 40 MB RSS), and a typed-borrow rewrite of the fleet's inbound `Value` (the
+`Value` is reused downstream for fan-out + the output JSONL, so it isn't a
+drop-in, and the saved CPU is invisible on a syscall-bound path). The engine is
+CPU-bound at ~52 µs/order and the release fleet is **syscall-bound** (`sys` >
+`user`): user-space JSON micro-opts genuinely do not move this system, exactly
+as Rounds 1-2 concluded.
+
 ## Reproduce it
 
 ```bash

@@ -95,8 +95,8 @@ echo "▶ building binaries (engine, leaderboard, orchestrator, fleet) ..."
 ( cd "$ENGINE_DIR" && go build -o "$ENGINE_BIN" . )
 ( cd "$LB_DIR" && go build -o "$LB_BIN" . )
 ( cd "$ORCH_DIR" && go build -o "$ORCH_BIN" . )
-( cd "$ROOT_DIR" && cargo build -p bot-fleet --quiet )
-FLEET_BIN="$ROOT_DIR/target/debug/bot-fleet"
+( cd "$ROOT_DIR" && cargo build --release -p bot-fleet --quiet )
+FLEET_BIN="$ROOT_DIR/target/release/bot-fleet"
 
 echo
 echo "══════════════════════════════════════════════════════════════════════"

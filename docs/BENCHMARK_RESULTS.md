@@ -53,9 +53,12 @@ not the matching logic. Price-time-priority correctness held at every regime,
 with the full limit/market/cancel mix.
 
 **Canonical demo numbers** (`scripts/run-local-demo.sh`, disruptor engine,
-24 bots × 5/s, n=624 orders/run): p50 0.26 ms, p90 0.36–0.62 ms, p99
-0.49–1.63 ms across repeated runs (at n=624 the p99 is the 7th-worst sample —
-quote it with the spread, not from a single run).
+**release-built fleet**, 24 bots × 5/s, n=624 orders/run): p50 0.24–0.29 ms,
+p90 0.34–0.40 ms, p99 0.42–0.47 ms across repeated runs. (An earlier revision of
+this line quoted p99 0.49–1.63 ms — that wide spread was the demo's *debug-built*
+load generator bunching its own tail; building the fleet `--release` like the
+saturation table above tightened it, with the engine unchanged. At n=624 the p99
+is still the 7th-worst sample, so quote it as a range, not from a single run.)
 
 ## Correctness under concurrency
 

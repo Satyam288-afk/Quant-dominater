@@ -172,6 +172,16 @@ func (h *Handler) GetRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, run)
 }
 
+// Upper bounds on contestant-supplied load. Without these, a request could ask
+// for millions of bots/rate/duration and make the orchestrator spawn a fleet
+// that exhausts host CPU/memory/FDs. The ceilings stay well above any real
+// benchmark shape (the saturation suite runs 500 bots x 100/s).
+const (
+	maxBotCount    = 5000
+	maxRatePerBot  = 2000
+	maxDurationSec = 300
+)
+
 func normalizeRunRequest(req *model.CreateRunRequest) {
 	defaults := model.DefaultRunRequest()
 	if req.BenchmarkSeed == 0 {
@@ -183,14 +193,27 @@ func normalizeRunRequest(req *model.CreateRunRequest) {
 	if req.Sandbox.MemoryLimit == "" {
 		req.Sandbox.MemoryLimit = defaults.Sandbox.MemoryLimit
 	}
+	// Network egress is an operator decision, never a contestant's: a submission
+	// must not be able to grant its own sandbox internet access (exfiltration /
+	// second-stage fetch). Operators enable it server-side when they need it.
+	req.Sandbox.NetworkEgress = false
 	if req.Config.BotCount <= 0 {
 		req.Config.BotCount = defaults.Config.BotCount
+	}
+	if req.Config.BotCount > maxBotCount {
+		req.Config.BotCount = maxBotCount
 	}
 	if req.Config.RatePerBot <= 0 {
 		req.Config.RatePerBot = defaults.Config.RatePerBot
 	}
+	if req.Config.RatePerBot > maxRatePerBot {
+		req.Config.RatePerBot = maxRatePerBot
+	}
 	if req.Config.DurationSec <= 0 {
 		req.Config.DurationSec = defaults.Config.DurationSec
+	}
+	if req.Config.DurationSec > maxDurationSec {
+		req.Config.DurationSec = maxDurationSec
 	}
 	if req.Config.WarmupSec < 0 {
 		req.Config.WarmupSec = 0
