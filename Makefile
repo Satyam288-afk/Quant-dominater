@@ -1,4 +1,4 @@
-.PHONY: proto-go test-go test-rust bot-fleet validator stub-engine rust-engine validate-fixture control-panel submission-api sandbox-runner orchestrator score-engine leaderboard-api console-api web web-build k8s-validate tf-validate iac-validate live-demo chaos-demo platform-demo console-stack reset-demo-state images demo
+.PHONY: proto-go test-go test-rust bot-fleet validator stub-engine rust-engine validate-fixture control-panel submission-api sandbox-runner orchestrator score-engine leaderboard-api console-api web web-build k8s-validate tf-validate iac-validate live-demo chaos-demo platform-demo console-stack reset-demo-state images demo kind-scale-proof
 
 PROTOC_GEN_GO ?= $(shell go env GOPATH)/bin/protoc-gen-go
 
@@ -107,6 +107,10 @@ images:
 # One-command platform walkthrough for the judges (maintained in scripts/).
 demo:
 	bash scripts/run-platform-demo.sh
+
+# Multi-node horizontal-scale proof on a local kind cluster (requires kind).
+kind-scale-proof:
+	bash scripts/run-kind-scale-proof.sh
 
 # Console (colleague's local benchmark console)
 console-api:

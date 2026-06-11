@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Namespace
+metadata: { name: scale-proof }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: stub-engine, namespace: scale-proof }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: stub-engine } }
+  template:
+    metadata: { labels: { app: stub-engine } }
+    spec:
+      containers:
+        - name: engine
+          image: iicpc/stub-engine:proof
+          imagePullPolicy: IfNotPresent
+          args: ["--addr", ":8080", "--engine", "disruptor", "--events", "/tmp/engine-events.jsonl"]
+          ports: [{ containerPort: 8080 }]
+          readinessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          resources:
+            requests: { cpu: "500m", memory: "128Mi" }
+            limits: { cpu: "3", memory: "512Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: stub-engine, namespace: scale-proof }
+spec:
+  selector: { app: stub-engine }
+  ports: [{ port: 8080, targetPort: 8080 }]
