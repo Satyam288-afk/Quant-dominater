@@ -71,6 +71,13 @@ bots, measures latency / throughput / correctness, and streams a live ranking.
 | leaderboard-api → UI | **WebSocket** (ranked snapshot, push-on-change) | live leaderboard |
 | control-plane services | **HTTP/JSON** today; proto message contracts defined (`proto/benchmark.proto`) and ready for a gRPC migration — gRPC not yet wired | simple now; `benchmark.proto` defines messages/enums only (no `service`/`rpc`), so a gRPC cutover is a follow-up |
 
+**WebSocket is the benchmark order path; REST is a documented fallback** on the
+stub-engine path (`examples/stub-engine` serves both), and **FIX is a deliberate
+scope decision** — the brief asks for "FIX, REST, OR WebSocket", and WebSocket
+(plus the REST fallback) satisfies that *or*. We chose WebSocket as primary
+because a full-duplex socket is the lowest-overhead way to drive a high-rate,
+bidirectional order/ack/fill loop without per-message HTTP framing.
+
 Kafka topics (created by `redpanda-init`): `telemetry.events.v1` (4p),
 `bench.orders.v1` (4p), `bench.fills.v1` (4p), `bench.scores.v1` (2p).
 
@@ -113,14 +120,19 @@ the engine, then validates and scores.
 
 ## 6. Isolation strategy
 
-The sandbox boundary is identical in Docker and Kubernetes mode (see
-[SECURITY_SANDBOX.md](SECURITY_SANDBOX.md)): all capabilities dropped, no
+The sandbox boundary is **substantially the same** in Docker and Kubernetes mode
+(see [SECURITY_SANDBOX.md](SECURITY_SANDBOX.md)): all capabilities dropped, no
 privilege escalation, read-only rootfs + locked tmpfs, memory cap with swap
 disabled, **CPU pinning** for fair latency, pids/nofile limits, optional
-gVisor runtime. Network is default-deny: a contestant pod is reachable **only**
-by the bot fleet on `:8080` and has **no** egress (internet or cross-contestant),
-enforced by `NetworkPolicy` in K8s and DNS black-holing + scoped networks in
-Docker. RBAC scopes the runner to manage pods only in `iicpc-sandbox`.
+gVisor runtime. One documented difference, not a full 1:1 parity: the K8s
+template runs the engine as `runAsUser 65532` (non-root), while Docker mode
+currently runs it as uid 0 — made non-privileged by `CapDrop: ALL` +
+`no-new-privileges` + seccomp, so it is defense-in-depth only (tracked as
+[RESIDUALS.md](RESIDUALS.md) item 3). Network is default-deny: a contestant pod
+is reachable **only** by the bot fleet on `:8080` and has **no** egress (internet
+or cross-contestant), enforced by `NetworkPolicy` in K8s and DNS black-holing +
+scoped networks in Docker. RBAC scopes the runner to manage pods only in
+`iicpc-sandbox`.
 
 ## 7. Scoring
 
@@ -141,6 +153,17 @@ Correctness comes from replaying the canonical input through the deterministic
 broken one fails).
 
 ## 8. How it scales horizontally
+
+**Scaling model.** The measured single-node ceiling is **~250k orders/s** (mutex
+engine, one `bot-fleet` process on a 12-core laptop, zero timeouts, single-digit-ms
+p99 — see [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md)); at that wall the binding
+constraint is JSON encoding + per-message socket writes (the transport), not the
+matcher. The design scales past that node linearly with **partitions and pods**,
+and the IaC realizes exactly that: more `bot-fleet` Job pods (each with a
+`--pod-index`-offset global ID range) generate more load, more Kafka partitions
+plus ingester HPA replicas absorb the telemetry, and the cluster autoscaler adds
+sandbox/platform nodes as concurrent runs grow. The multi-node figures are
+designed-for, not yet measured (tracked in [RESIDUALS.md](RESIDUALS.md)).
 
 - **Load** — bot-fleet is an Indexed K8s Job: `parallelism × BOTS_PER_POD` bots
   across nodes (default 8 × 1250 = 10,000). The Rust fleet also multiplexes many

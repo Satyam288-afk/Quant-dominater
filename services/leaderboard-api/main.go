@@ -131,6 +131,21 @@ func main() {
 		mux.Handle("GET /", http.FileServer(http.Dir(uiDir)))
 	}
 
+	// Optionally serve the polished React board (Vite `web/dist`) when it has
+	// been built, mirroring the static-console FileServer above. It coexists
+	// with the legacy console at `/`: the SPA index is mounted at /board/ and
+	// its hashed bundles at /assets/ (the absolute paths Vite emits). Absent a
+	// build, this is a no-op, so headless / CI runs are unaffected.
+	boardDir := os.Getenv("LEADERBOARD_BOARD_DIR")
+	if boardDir == "" {
+		boardDir = filepath.Join(repoRoot, "web", "dist")
+	}
+	if fileExists(filepath.Join(boardDir, "index.html")) {
+		boardFS := http.FileServer(http.Dir(boardDir))
+		mux.Handle("GET /board/", http.StripPrefix("/board/", boardFS))
+		mux.Handle("GET /assets/", boardFS)
+	}
+
 	addr := os.Getenv("LEADERBOARD_API_ADDR")
 	if addr == "" {
 		addr = ":9500"

@@ -33,12 +33,13 @@ func TestScoreUsesWeightedFormula(t *testing.T) {
 			Timeouts:      10,
 			ConnectErrors: 0,
 			TPS:           10,
-			P99MS:         52.5,
+			P99MS:         5.0,
 		},
 	})
 
-	if got.LatencyScore != 50 {
-		t.Fatalf("latency score = %v, want 50", got.LatencyScore)
+	// p99=5ms on the log curve -> 100*log10(50/5)/log10(50/0.1) = 37.05.
+	if got.LatencyScore != 37.05 {
+		t.Fatalf("latency score = %v, want 37.05", got.LatencyScore)
 	}
 	if got.ThroughputScore != 50 {
 		t.Fatalf("throughput score = %v, want 50", got.ThroughputScore)
@@ -46,8 +47,30 @@ func TestScoreUsesWeightedFormula(t *testing.T) {
 	if got.StabilityScore != 90 {
 		t.Fatalf("stability score = %v, want 90", got.StabilityScore)
 	}
-	if got.Score != 63 {
-		t.Fatalf("score = %v, want 63", got.Score)
+	// 0.40*37.05 + 0.30*50 + 0.20*90 + 0.10*100 = 57.82. This also pins the
+	// 0.40/0.30/0.20/0.10 weights (a 0.40->0.04 typo would fail here).
+	if got.Score != 57.82 {
+		t.Fatalf("score = %v, want 57.82", got.Score)
+	}
+}
+
+func TestLatencyScoreLogCurve(t *testing.T) {
+	cases := []struct{ p99, want float64 }{
+		{0, 0},      // no measurement -> no credit (not a silent perfect score)
+		{0.05, 100}, // below the 0.1ms floor
+		{0.1, 100},  // at the floor
+		{5.0, 37.05},
+		{50, 0},  // at the cap
+		{100, 0}, // beyond the cap
+	}
+	for _, c := range cases {
+		if got := latencyScore(c.p99); got != c.want {
+			t.Fatalf("latencyScore(%.2f) = %v, want %v", c.p99, got, c.want)
+		}
+	}
+	// Strictly decreasing across the sub-5ms band the old flat rule tied at 100.
+	if !(latencyScore(0.5) > latencyScore(1) && latencyScore(1) > latencyScore(2) && latencyScore(2) > latencyScore(5)) {
+		t.Fatal("latency curve must strictly decrease across 0.5->5ms")
 	}
 }
 
@@ -99,7 +122,7 @@ func TestScoreUsesSampledResource(t *testing.T) {
 		Validation: &ValidationResult{Valid: true},
 		Metrics: &Metrics{
 			OrdersSent: 100, Timeouts: 0, ConnectErrors: 0,
-			TPS: 20, P99MS: 2, // perfect latency/throughput/stability
+			TPS: 20, P99MS: 0.05, // floor-level latency -> 100; perfect throughput/stability
 			CPUPctPeak: 70, MemMBPeak: 512,
 		},
 	}

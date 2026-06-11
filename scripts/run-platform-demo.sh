@@ -48,17 +48,11 @@ rm -rf "$DEMO_SUBMISSION_ROOT"
 
 PIDS=()
 cleanup() {
-  if [[ "${KEEP_SERVICES:-0}" == "1" ]]; then
-    echo "services left running:"
-    echo "  submission-api  $SUBMISSION_URL"
-    echo "  sandbox-runner   $SANDBOX_URL"
-    echo "  orchestrator     $ORCH_URL"
-    echo "  leaderboard      $LEADERBOARD_URL"
-    return 0
-  fi
   if (( ${#PIDS[@]} == 0 )); then
     return 0
   fi
+  echo
+  echo "stopping services"
   for pid in "${PIDS[@]}"; do
     kill "$pid" >/dev/null 2>&1 || true
   done
@@ -143,7 +137,7 @@ start_service() {
   PIDS+=("$!")
 }
 
-echo "[1/7] packaging example engine"
+echo "[1/8] packaging example engine"
 require_port_free submission-api "$SUBMISSION_ADDR"
 require_port_free sandbox-runner "$SANDBOX_ADDR"
 require_port_free orchestrator "$ORCH_ADDR"
@@ -153,7 +147,25 @@ require_port_free leaderboard-api "$LEADERBOARD_ADDR"
   zip -qr "$DEMO_DIR/stub-engine.zip" .
 )
 
-echo "[2/7] starting services"
+echo "[2/8] building polished leaderboard board (web/dist)"
+# The leaderboard-api serves web/dist at /board/ when it exists; build it now so
+# the live board is populated by default. Skipped gracefully without node/npm so
+# headless runs still complete (the API simply omits the /board/ route).
+if command -v npm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  (
+    cd "$ROOT_DIR/web"
+    if [[ ! -d node_modules ]]; then
+      echo "installing web dependencies"
+      npm install --silent
+    fi
+    npm run build --silent
+  ) && echo "board built -> $ROOT_DIR/web/dist" \
+    || echo "web build failed; continuing without the React board (/board/)" >&2
+else
+  echo "node/npm not found; skipping React board build (legacy console at / still served)"
+fi
+
+echo "[3/8] starting services"
 start_service submission-api services/submission-api env SUBMISSION_API_ADDR="$SUBMISSION_ADDR" SUBMISSION_ARTIFACT_ROOT="$DEMO_SUBMISSION_ROOT" SUBMISSION_INDEX_PATH="$DEMO_SUBMISSION_INDEX" go run .
 start_service sandbox-runner services/sandbox-runner env SANDBOX_RUNNER_ADDR="$SANDBOX_ADDR" SANDBOX_RUNNER_MODE=local SUBMISSION_ARTIFACT_ROOT="$DEMO_SUBMISSION_ROOT" go run .
 start_service leaderboard-api services/leaderboard-api env LEADERBOARD_API_ADDR="$LEADERBOARD_ADDR" LEADERBOARD_STORE_PATH="$DEMO_LEADERBOARD_STORE" go run .
@@ -164,7 +176,7 @@ wait_health sandbox-runner "$SANDBOX_URL"
 wait_health leaderboard-api "$LEADERBOARD_URL"
 wait_health orchestrator "$ORCH_URL"
 
-echo "[3/7] submitting engine artifact"
+echo "[4/8] submitting engine artifact"
 curl -fsS "${SUBMISSION_AUTH_ARGS[@]}" -X POST "$SUBMISSION_URL/submissions" \
   -F team_id=demo_team \
   -F language=go \
@@ -174,7 +186,7 @@ curl -fsS "${SUBMISSION_AUTH_ARGS[@]}" -X POST "$SUBMISSION_URL/submissions" \
 SUBMISSION_ID="$(json_get "$DEMO_DIR/submission.json" submission_id)"
 echo "submission_id=$SUBMISSION_ID"
 
-echo "[4/7] creating benchmark run"
+echo "[5/8] creating benchmark run"
 curl -fsS "${SUBMISSION_AUTH_ARGS[@]}" -X POST "$SUBMISSION_URL/submissions/$SUBMISSION_ID/runs" \
   -H "Content-Type: application/json" \
   -d '{"benchmark_seed":42,"sandbox":{"cpu_limit":"1","memory_limit":"512Mi","network_egress":false},"config":{"bot_count":10,"rate_per_bot":2,"duration_sec":5,"warmup_sec":0}}' \
@@ -183,7 +195,7 @@ RUN_ID="$(json_get "$DEMO_DIR/run-created.json" run_id)"
 echo "run_id=$RUN_ID"
 curl -fsS "${ORCHESTRATOR_AUTH_ARGS[@]}" -X POST "$ORCH_URL/runs/$RUN_ID/start" >/dev/null
 
-echo "[5/7] waiting for orchestrator to finish"
+echo "[6/8] waiting for orchestrator to finish"
 for _ in {1..120}; do
   curl -fsS "${ORCHESTRATOR_AUTH_ARGS[@]}" "$ORCH_URL/runs/$RUN_ID" > "$DEMO_DIR/run-final.json"
   STATUS="$(json_get "$DEMO_DIR/run-final.json" status)"
@@ -203,7 +215,7 @@ if [[ "$STATUS" != "FINISHED" ]]; then
   exit 1
 fi
 
-echo "[6/7] fetching leaderboard and artifacts"
+echo "[7/8] fetching leaderboard and artifacts"
 wait_leaderboard_entry "$RUN_ID"
 ARTIFACT_DIR="$(json_get "$DEMO_DIR/run-final.json" artifact_dir)"
 python3 - "$ARTIFACT_DIR" > "$DEMO_DIR/artifacts.json" <<'PY'
@@ -217,7 +229,7 @@ for name in sorted(os.listdir(root)):
 print(json.dumps(items, indent=2))
 PY
 
-echo "[7/7] result"
+echo "[8/8] result"
 python3 - "$DEMO_DIR/run-final.json" "$DEMO_DIR/leaderboard.json" "$DEMO_DIR/artifacts.json" <<'PY'
 import json, sys
 from pathlib import Path
@@ -257,7 +269,30 @@ summary = {
 print(json.dumps(summary, indent=2))
 PY
 
-echo "platform demo files: $DEMO_DIR"
-if [[ "${KEEP_SERVICES:-0}" == "1" ]]; then
-  echo "leaderboard UI: $LEADERBOARD_URL/"
+echo
+echo "==============================================================="
+echo " upload -> build -> benchmark -> score -> live leaderboard  ✓"
+echo "==============================================================="
+echo " run_id:               $RUN_ID"
+echo " platform demo files:  $DEMO_DIR"
+echo " service logs:         $DEMO_DIR/*.log"
+echo
+echo " OPEN THE LIVE BOARD:"
+if [[ -f "$ROOT_DIR/web/dist/index.html" ]]; then
+  echo "   polished React board:  $LEADERBOARD_URL/board/"
 fi
+echo "   live console:          $LEADERBOARD_URL/"
+echo
+echo " services left running (press Ctrl+C to stop):"
+echo "   submission-api   $SUBMISSION_URL"
+echo "   sandbox-runner   $SANDBOX_URL"
+echo "   orchestrator     $ORCH_URL"
+echo "   leaderboard      $LEADERBOARD_URL"
+echo "==============================================================="
+
+# Keep the stack up so a judge can open the board after the scored run.
+# Blocks in the foreground until Ctrl+C, at which point the EXIT trap stops
+# every service cleanly.
+while true; do
+  sleep 3600
+done

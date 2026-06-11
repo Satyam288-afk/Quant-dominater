@@ -44,9 +44,23 @@ kubectl kustomize infra/k8s | kubeconform -strict -summary -kubernetes-version 1
   beyond that, multi-node via the Redpanda Operator.
 - **Live API** — `leaderboard-api` is stateless (reads Redis); HPA 2→10 on CPU.
 
+## Shipped runtime vs. validated cloud template
+
+The **shipped** sandbox runtime — proven by every demo in this repo — is a
+single-host subprocess fleet: the sandbox-runner runs in `local` or `docker`
+mode and launches the contestant engine as a host process / container. The
+manifests here are the **validated cloud-native template** (32 resources pass
+`kubeconform -strict`, with HPAs and NetworkPolicy) designed to scale that same
+benchmark cell across a cluster; the `kubernetes` runner mode that would apply
+`40-sandbox-pod-template` per run is a documented next step, not yet running
+code. `21-sandbox-runner.yaml` therefore sets `SANDBOX_RUNNER_MODE=docker` (a
+mode the runner actually supports) rather than `kubernetes`.
+
 ## Per-run lifecycle (orchestrator-driven)
 
-The orchestrator does not pre-create contestant pods. Per benchmark run it:
+This is the cloud-native lifecycle the template realizes once the `kubernetes`
+runner mode is instantiated. The orchestrator does not pre-create contestant
+pods. Per benchmark run it:
 
 1. asks `sandbox-runner` to build + apply a `40-sandbox-pod-template` instance
    (`RUN_ID`/`REGISTRY` substituted) into `iicpc-sandbox`;

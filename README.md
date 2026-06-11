@@ -29,7 +29,7 @@ local data plane** (Redpanda + TimescaleDB + Redis via docker-compose), and a
 | Deliverable | Where |
 |---|---|
 | **1. Working prototype** (upload → deploy → load test → scoring) | `services/*`, `rust/*`, `web/`, `scripts/run-live-demo.sh` — measured numbers in [docs/BENCHMARK_RESULTS.md](docs/BENCHMARK_RESULTS.md) (~50k orders/s driven, p99 + peak-TPS curve, correctness held over 191k fills) |
-| **2. Architecture Blueprint** | [docs/BLUEPRINT.md](docs/BLUEPRINT.md) (+ ARCHITECTURE, API_CONTRACT, SCORING, SECURITY_SANDBOX, [RESILIENCE](docs/RESILIENCE.md), [PROFILING](docs/PROFILING.md)) |
+| **2. Architecture Blueprint** | [docs/BLUEPRINT.md](docs/BLUEPRINT.md) (+ ARCHITECTURE, API_CONTRACT, SCORING, SECURITY_SANDBOX, [RESILIENCE](docs/RESILIENCE.md), [PROFILING](docs/PROFILING.md), [RESIDUALS](docs/RESIDUALS.md) risk register) |
 | **3. Infrastructure as Code** | [infra/k8s](infra/k8s) (32 validated resources, HPA, NetworkPolicy), [infra/terraform](infra/terraform) (EKS/ECR/VPC), [infra/docker-compose](infra/docker-compose) |
 
 ## Current Components

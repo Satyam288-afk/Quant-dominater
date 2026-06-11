@@ -1,8 +1,11 @@
 # Architecture
 
-The platform is a deterministic benchmark system for contestant trading engines. The final production shape has a control plane for submissions, sandboxing, orchestration, scoring, and leaderboard updates, plus a data plane for high-frequency order traffic and validation.
+The platform is a deterministic benchmark system for contestant trading engines. It has a control plane for submissions, sandboxing, orchestration, scoring, and leaderboard updates, plus a data plane for high-frequency order traffic and validation. This doc captures the design rationale and lifecycle; the full system-design contract is in [BLUEPRINT.md](BLUEPRINT.md).
 
-This repo starts with a local vertical slice:
+It was **built bottom-up**, starting from the local vertical slice below and
+layering the data plane, control plane, and cloud-native IaC on top — all of
+which now exist (see [PRODUCTION_GAP_ANALYSIS.md](PRODUCTION_GAP_ANALYSIS.md) for
+the current code-verified status). The local slice:
 
 ```text
 Rust Bot Fleet -> Contestant Engine Stub
@@ -25,9 +28,14 @@ Rust Bot Fleet -> Contestant Engine Stub
 | Rust bot fleet | Tokio async sessions scale to many lightweight bots |
 | Reference orderbook | Correctness is measured, not trusted |
 | Correctness gate | A fast incorrect engine gets score `0` |
-| Infra later | Terraform/Kubernetes only matter after the benchmark core works |
+| Infra after the core | Terraform/Kubernetes were built once the benchmark core was proven, so the IaC encodes a working system rather than a guess |
 
-## Final Production Direction
+## Production Direction (now realized)
+
+The diagram below is the shape the platform was driving toward; the live data
+plane (Redpanda → ingester → Timescale/Redis → score-engine → leaderboard) and
+the validated EKS/K8s IaC that realize it are now in the repo. Object storage
+uses the `local://` artifact store today, with MinIO/S3 as the cloud-mode swap.
 
 ```text
 Submission API -> Sandbox Runner -> Contest Orchestrator
@@ -57,7 +65,7 @@ SANDBOX_STARTING
 HEALTHCHECKING
 BENCHMARKING
 VALIDATING
-SCORED
+SCORING
 FINISHED
 ```
 
@@ -81,14 +89,21 @@ INFRA_FAILED
 | `contestant_outputs.jsonl` | bot fleet | acks/fills received from engine |
 | `engine-events.jsonl` | stub engine | engine-side input/output audit log |
 
-## Next Layers
+## Build Sequence (completed)
 
-After the local path works:
+The layers were added on top of the local path in this order, and all are now in
+the repo:
 
-1. Add Redpanda topics for telemetry.
-2. Add leaderboard API and Redis live state.
-3. Add submission API and Docker build path.
-4. Add sandbox hardening with gVisor/cgroups/network policy.
-5. Add orchestrator state machine.
-6. Add Kubernetes and Terraform.
+1. ✅ Redpanda topics for telemetry.
+2. ✅ Leaderboard API and Redis live state.
+3. ✅ Submission API and Docker build path.
+4. ✅ Sandbox hardening with cgroups/network policy (gVisor as a runtime hook).
+5. ✅ Orchestrator state machine.
+6. ✅ Kubernetes (validated cell + HPA + NetworkPolicy) and Terraform (VPC + EKS + ECR).
+
+What is intentionally *not* yet production-grade — durable DB control plane,
+identity-aware auth, an automated malicious-code fixture suite, observability,
+CI/CD, and the in-cluster `kubernetes` runner mode — is tracked honestly in
+[PRODUCTION_GAP_ANALYSIS.md](PRODUCTION_GAP_ANALYSIS.md) and
+[RESIDUALS.md](RESIDUALS.md).
 
