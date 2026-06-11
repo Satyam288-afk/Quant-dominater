@@ -60,6 +60,31 @@ load generator bunching its own tail; building the fleet `--release` like the
 saturation table above tightened it, with the engine unchanged. At n=624 the p99
 is still the 7th-worst sample, so quote it as a range, not from a single run.)
 
+## Latency floor (closed-loop probe)
+
+The open-loop numbers above measure latency under a realistic arrival process —
+which, at 5 orders/s per bot, is dominated by the *fleet's own* parked-task
+wake-ups (~90 % of the round trip; decomposition in
+[PROFILING.md](PROFILING.md), Round 5), not by the engine or the wire. The
+fleet's `--closed-loop` mode removes that term by sending each next order the
+moment the previous ack lands, measuring the WS+JSON transport floor itself:
+
+| Mode | Bots | Orders (5 s) | Sustained TPS | p50 | p90 | p99 | Timeouts | Correctness |
+|---|---|---|---|---|---|---|---|---|
+| Closed-loop probe | 1 | 138,319 | 27,664 | 0.03 ms | 0.04 ms | 0.05 ms | 0 | ✅ valid |
+| Closed-loop probe | 4 | 287,775 | 57,555 | 0.06 ms | 0.10 ms | 0.14 ms | 0 | — |
+
+Same engine, same order mix (limit/market/cancel), same wire-adjacent stamps,
+same validator replay — only the send trigger differs. The probe is **not** the
+scored mode: a closed loop self-clocks, so it under-reports queueing under
+overload (the coordinated-omission caveat); it answers "what can this platform
+resolve?" (~30 µs round trips, ~1.5 µs/order of fleet overhead at 28 k/s on one
+connection), while the open-loop tables above answer "how does an engine behave
+under load it does not control?". Reproduce: add `--closed-loop --bots 1` to
+the fleet invocation against a **fresh** engine (a reused engine still holds the
+previous run's resting orders, which the new run's validator rightly knows
+nothing about and will flag).
+
 ## Correctness under concurrency
 
 The same load is replayed in the engine's authoritative arrival order, so a

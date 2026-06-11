@@ -360,11 +360,13 @@ Artifacts are written to:
 ```text
 run_id: run_local_001
 bots: 100
+loop_mode: open
 orders_sent: 30000
 acks_received: 30000
 fills_received: 24380
 timeouts: 0
 connect_errors: 0
+reconnects: 0
 tps: 501.7
 peak_tps: 540
 p50: 0.3ms
