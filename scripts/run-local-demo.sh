@@ -8,6 +8,14 @@ RUN_DIR="$ROOT_DIR/.runs/local-demo"
 mkdir -p "$RUN_DIR"
 rm -f "$RUN_DIR/events.jsonl" "$RUN_DIR/contestant_outputs.jsonl" "$RUN_DIR/engine-events.jsonl" "$RUN_DIR/telemetry.jsonl"
 
+# Pre-flight: free :8080. A stub engine left listening from a previous run keeps
+# accumulating book state across runs; the bot fleet would silently talk to the
+# stale engine (its book is non-empty) while the validator replays from an empty
+# book — producing spurious correctness violations. Kill any straggler first.
+if command -v lsof >/dev/null 2>&1; then
+  lsof -ti tcp:8080 2>/dev/null | xargs kill -9 2>/dev/null || true
+fi
+
 cleanup() {
   if [[ -n "${ENGINE_PID:-}" ]]; then
     kill "$ENGINE_PID" >/dev/null 2>&1 || true
@@ -16,10 +24,15 @@ cleanup() {
 trap cleanup EXIT
 
 echo "starting stub engine on :8080"
-(
-  cd "$ENGINE_DIR"
-  go run . --addr :8080 --events "$RUN_DIR/engine-events.jsonl"
-) &
+# Set STUB_PPROF=:6060 to expose net/http/pprof on the engine (see docs/PROFILING.md).
+# --engine disruptor: at this exact load the lock-free engine measured
+# p50/p99 0.48/2.00ms vs the mutex engine's 1.52/4.95ms (cost: ~30% of one
+# core while idle — fine on a bench host). STUB_ENGINE=mutex flips it back.
+# Build then exec the binary DIRECTLY: with `( cd ...; go run . ) &` the
+# recorded pid is the subshell, bash does not forward SIGTERM, and the engine
+# survived cleanup as an orphan — so the graceful audit flush never ran.
+(cd "$ENGINE_DIR" && go build -o "$RUN_DIR/stub-engine" .)
+"$RUN_DIR/stub-engine" --addr :8080 --engine "${STUB_ENGINE:-disruptor}" --events "$RUN_DIR/engine-events.jsonl" ${STUB_PPROF:+--pprof "$STUB_PPROF"} &
 ENGINE_PID=$!
 
 for _ in {1..50}; do
@@ -31,15 +44,30 @@ done
 
 curl -fsS http://localhost:8080/health
 
-echo "running bot fleet"
+# The fleet is the measuring instrument; build it --release so the headline
+# p50/p99 come from an optimised binary. A debug fleet measured ~2x the p99 tail
+# and ~28x the RSS at saturation purely from its own un-inlined JSON path — i.e.
+# the harness billing its own overhead to the engine under test.
+echo "building fleet + validator (release)"
+(cd "$ROOT_DIR" && cargo build --release -p bot-fleet -p validator --quiet)
+FLEET_BIN="$ROOT_DIR/target/release/bot-fleet"
+VALIDATOR_BIN="$ROOT_DIR/target/release/validator"
+
+echo "running bot fleet (24 bots over 4 ws conns, 4 shared symbols, 5-level price ladder, ~10% market + ~12% cancel orders)"
 (
   cd "$ROOT_DIR"
-  cargo run -p bot-fleet --bin bot-fleet -- \
+  "$FLEET_BIN" \
     --target ws://localhost:8080/ws \
-    --bots 10 \
-    --orders-per-sec 2 \
+    --bots 24 \
+    --orders-per-sec 5 \
     --duration-sec 5 \
     --seed 42 \
+    --ws-connections 4 \
+    --symbols 4 \
+    --price-levels 5 \
+    --qty-max 10 \
+    --market-per-mille 100 \
+    --cancel-per-mille 120 \
     --events-out "$RUN_DIR/events.jsonl" \
     --outputs-out "$RUN_DIR/contestant_outputs.jsonl" \
     --telemetry-out "$RUN_DIR/telemetry.jsonl"
@@ -48,7 +76,7 @@ echo "running bot fleet"
 echo "validating outputs"
 (
   cd "$ROOT_DIR"
-  cargo run -p validator -- \
+  "$VALIDATOR_BIN" \
     --events "$RUN_DIR/events.jsonl" \
     --contestant-outputs "$RUN_DIR/contestant_outputs.jsonl"
 )

@@ -1,0 +1,77 @@
+# Per-run contestant sandbox — TEMPLATE, not applied by kustomize.
+# The sandbox-runner instantiates one of these per run via the Kubernetes API
+# (scoped by RBAC to iicpc-sandbox). Every securityContext control mirrors the
+# Docker-mode hardening 1:1, so the isolation guarantees are identical whether
+# the platform runs locally or in the cloud.
+#
+#   Docker control            -> Kubernetes equivalent (below)
+#   CapDrop: ALL              -> capabilities.drop: [ALL]
+#   no-new-privileges         -> allowPrivilegeEscalation: false
+#   ReadonlyRootfs            -> readOnlyRootFilesystem: true
+#   default/explicit seccomp  -> seccompProfile: RuntimeDefault
+#   CpusetCpus (pinning)      -> requests == limits (Guaranteed QoS + static CPU manager)
+#   Memory cap + no swap      -> resources.limits.memory (cgroup memory.max; swap off by default)
+#   PidsLimit                 -> (cluster pids cgroup) / LimitRange in iicpc-sandbox
+#   egress denied             -> NetworkPolicy (41-network-policies.yaml)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sandbox-RUN_ID # runner substitutes the run id
+  namespace: iicpc-sandbox
+  labels:
+    app: contestant-engine
+    zone: untrusted
+    run-id: RUN_ID
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  enableServiceLinks: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: engine
+      image: REGISTRY/iicpc-sandbox:RUN_ID # built by the sandbox-runner from the artifact
+      # --events "" : the engine's default audit path is a RELATIVE file, which
+      # log.Fatal's on this read-only rootfs. The authoritative run record is
+      # the fleet's own events.jsonl; the engine-side audit is best-effort and
+      # would risk filling the 64Mi tmpfs on long runs anyway.
+      args: ["--addr", ":8080", "--events", ""]
+      ports:
+        - { name: engine, containerPort: 8080 }
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        privileged: false
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        # requests == limits => Guaranteed QoS. With the kubelet static CPU
+        # manager policy this grants exclusive (pinned) cores — fair latency.
+        requests: { cpu: "2", memory: "1Gi" }
+        limits: { cpu: "2", memory: "1Gi" }
+      readinessProbe:
+        httpGet: { path: /health, port: 8080 }
+        initialDelaySeconds: 2
+        periodSeconds: 3
+      volumeMounts:
+        - { name: tmp, mountPath: /tmp }
+  volumes:
+    - name: tmp
+      emptyDir: { medium: Memory, sizeLimit: 64Mi }
+---
+# Service the bot fleet connects to (created per run alongside the pod).
+apiVersion: v1
+kind: Service
+metadata:
+  name: engine-RUN_ID
+  namespace: iicpc-sandbox
+  labels: { app: contestant-engine, run-id: RUN_ID }
+spec:
+  selector: { app: contestant-engine, run-id: RUN_ID }
+  ports:
+    - { name: engine, port: 8080, targetPort: 8080 }

@@ -1,0 +1,84 @@
+# Redpanda = the telemetry bus (Kafka API). One broker for the dev cell; in
+# production use the Redpanda Operator for a multi-broker, rack-aware cluster.
+# Partition count on telemetry.events.v1 sets the ingester's max parallelism.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redpanda
+  namespace: iicpc
+  labels: { app: redpanda }
+spec:
+  clusterIP: None # headless for stable per-broker DNS
+  selector: { app: redpanda }
+  ports:
+    - { name: kafka, port: 9092, targetPort: 9092 }
+    - { name: admin, port: 9644, targetPort: 9644 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redpanda
+  namespace: iicpc
+spec:
+  serviceName: redpanda
+  replicas: 1
+  selector: { matchLabels: { app: redpanda } }
+  template:
+    metadata:
+      labels: { app: redpanda }
+    spec:
+      containers:
+        - name: redpanda
+          image: redpandadata/redpanda:v24.2.7
+          args:
+            - redpanda
+            - start
+            - --kafka-addr=internal://0.0.0.0:9092
+            - --advertise-kafka-addr=internal://redpanda.iicpc.svc.cluster.local:9092
+            - --rpc-addr=0.0.0.0:33145
+            - --mode=dev-container
+            - --smp=1
+            - --default-log-level=warn
+          ports:
+            - { name: kafka, containerPort: 9092 }
+            - { name: admin, containerPort: 9644 }
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits: { cpu: "2", memory: "2Gi" }
+          readinessProbe:
+            exec: { command: ["rpk", "cluster", "health", "--exit-when-healthy"] }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/redpanda/data }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: 10Gi } }
+---
+# Create the canonical topics once the broker is healthy.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: redpanda-topic-init
+  namespace: iicpc
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init
+          image: redpandadata/redpanda:v24.2.7
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              B=redpanda.iicpc.svc.cluster.local:9092
+              until rpk cluster health --brokers "$B" --exit-when-healthy; do sleep 2; done
+              rpk topic create telemetry.events.v1 --brokers "$B" -p 4 -r 1 || true
+              rpk topic create bench.orders.v1     --brokers "$B" -p 4 -r 1 || true
+              rpk topic create bench.fills.v1      --brokers "$B" -p 4 -r 1 || true
+              rpk topic create bench.scores.v1     --brokers "$B" -p 2 -r 1 || true
+              rpk topic list --brokers "$B"

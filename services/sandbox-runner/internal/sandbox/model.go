@@ -20,7 +20,11 @@ type ImageRef struct {
 }
 
 type SandboxSpec struct {
-	CPULimit      string `json:"cpu_limit"`
+	CPULimit string `json:"cpu_limit"`
+	// CpusetCpus pins the sandbox to specific physical cores (e.g. "2,3").
+	// Pinning removes scheduler cross-talk between contestants so latency
+	// numbers are fair and reproducible. Empty = no pinning.
+	CpusetCpus    string `json:"cpuset_cpus,omitempty"`
 	MemoryLimit   string `json:"memory_limit"`
 	NetworkEgress bool   `json:"network_egress"`
 }

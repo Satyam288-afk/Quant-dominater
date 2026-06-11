@@ -1,0 +1,46 @@
+# Telemetry ingester: consumes telemetry.events.v1, rolls up percentiles, and
+# writes metrics_raw (Timescale) + live run metrics (Redis). It's a Kafka
+# consumer group, so replicas scale horizontally up to the partition count (4).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-ingester
+  namespace: iicpc
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: telemetry-ingester } }
+  template:
+    metadata:
+      labels: { app: telemetry-ingester }
+    spec:
+      containers:
+        - name: telemetry-ingester
+          image: ghcr.io/iicpc/telemetry-ingester:latest # built with --features live
+          args: ["--source", "kafka"]
+          env:
+            - { name: KAFKA_BROKERS,         valueFrom: { configMapKeyRef: { name: platform-config, key: KAFKA_BROKERS } } }
+            - { name: KAFKA_TELEMETRY_TOPIC, valueFrom: { configMapKeyRef: { name: platform-config, key: KAFKA_TELEMETRY_TOPIC } } }
+            - { name: KAFKA_GROUP_ID,        valueFrom: { configMapKeyRef: { name: platform-config, key: KAFKA_GROUP_ID } } }
+            - { name: REDIS_URL,             valueFrom: { configMapKeyRef: { name: platform-config, key: REDIS_URL } } }
+            - { name: TIMESCALE_URL,         valueFrom: { secretKeyRef:    { name: db-credentials, key: TIMESCALE_URL } } }
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits: { cpu: "2", memory: "1Gi" }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: telemetry-ingester
+  namespace: iicpc
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: telemetry-ingester
+  minReplicas: 2
+  maxReplicas: 4 # == telemetry.events.v1 partition count
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 65 }

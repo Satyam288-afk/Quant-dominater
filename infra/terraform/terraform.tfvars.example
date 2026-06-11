@@ -1,0 +1,15 @@
+# Copy to terraform.tfvars and adjust. All values have sane defaults.
+region          = "us-east-1"
+environment     = "dev"
+cluster_name    = "iicpc-benchmark"
+cluster_version = "1.30"
+
+# Scale the platform pool up for heavier load generation.
+platform_instance_types = ["m6i.xlarge"]
+platform_min_size       = 2
+platform_max_size       = 10
+
+# Compute-optimized, isolated pool for contestant sandboxes.
+sandbox_instance_types = ["c6i.2xlarge"]
+sandbox_min_size       = 1
+sandbox_max_size       = 8

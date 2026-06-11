@@ -1,0 +1,50 @@
+# Sandbox runner: builds contestant images and launches sandboxes. In-cluster
+# the sandbox boundary is a Pod in iicpc-sandbox (see 40-sandbox-pod-template),
+# created via the scoped sandbox-orchestrator ServiceAccount — never Docker-in-
+# Docker. Builds run through a rootless BuildKit (kaniko/buildkitd) in cloud mode.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-runner
+  namespace: iicpc
+  labels: { app: sandbox-runner }
+spec:
+  selector: { app: sandbox-runner }
+  ports:
+    - { name: http, port: 9200, targetPort: 9200 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-runner
+  namespace: iicpc
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: sandbox-runner } }
+  template:
+    metadata:
+      labels: { app: sandbox-runner }
+    spec:
+      serviceAccountName: sandbox-orchestrator
+      containers:
+        - name: sandbox-runner
+          image: ghcr.io/iicpc/sandbox-runner:latest
+          env:
+            - { name: SANDBOX_RUNNER_ADDR, value: ":9200" }
+            - { name: SANDBOX_RUNNER_MODE, value: "kubernetes" }
+            - { name: SANDBOX_NAMESPACE, value: "iicpc-sandbox" }
+            - { name: REPO_ROOT, value: "/data" }
+          ports:
+            - { name: http, containerPort: 9200 }
+          resources:
+            requests: { cpu: "200m", memory: "256Mi" }
+            limits: { cpu: "1", memory: "1Gi" }
+          readinessProbe:
+            httpGet: { path: /health, port: 9200 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          volumeMounts:
+            - { name: artifacts, mountPath: /data }
+      volumes:
+        - name: artifacts
+          emptyDir: {}

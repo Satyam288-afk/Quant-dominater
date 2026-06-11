@@ -19,6 +19,8 @@ import (
 )
 
 func main() {
+	// Cancelled on SIGTERM/SIGINT. Stops the claim worker from picking up new
+	// runs and drives graceful drain of HTTP + in-flight runs.
 	serverCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
@@ -65,6 +67,7 @@ func main() {
 		runner.SetLeaderboardPublisher(executor.NewLeaderboardPublisher(leaderboardURL))
 	}
 	if autoStart {
+		// Worker stops claiming new runs when serverCtx is cancelled.
 		runner.StartWorker(serverCtx, pollInterval)
 	}
 
@@ -78,7 +81,11 @@ func main() {
 		addr = ":9300"
 	}
 
-	srv := &http.Server{Addr: addr, Handler: httpHandler, ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           httpHandler,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 	go func() {
 		log.Printf("orchestrator listening on %s repo_root=%s sandbox_runner_url=%s run_timeout=%s auto_start=%t poll_interval=%s", addr, repoRoot, sandboxRunnerURL, runTimeout, autoStart, pollInterval)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -87,7 +94,7 @@ func main() {
 	}()
 
 	<-serverCtx.Done()
-	stop()
+	stop() // restore default handling so a second signal force-quits
 	log.Printf("shutdown signal received; stopping worker, draining HTTP, cancelling in-flight runs")
 
 	shutCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -95,6 +102,8 @@ func main() {
 	if err := srv.Shutdown(shutCtx); err != nil {
 		log.Printf("http shutdown: %v", err)
 	}
+	// Cancel and drain in-flight runs (their goroutines persist a terminal
+	// state) before the process exits — no orphaned runs or child processes.
 	runner.Shutdown(shutCtx)
 	log.Printf("orchestrator drained cleanly")
 }

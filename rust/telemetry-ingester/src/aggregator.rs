@@ -1,16 +1,100 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 
 use bench_core::metrics::histogram::LatencyHistogram;
+use bench_core::metrics::TpsCounter;
 use bench_core::telemetry::{EventKind, TelemetryEvent};
 use serde::Serialize;
 
 /// Per-(run_id) aggregate. Within a run we track per-bot percentiles so
 /// downstream consumers can drill in, plus a roll-up across all bots.
-#[derive(Default)]
 struct RunState {
     bots: HashMap<String, BotState>,
     first_ts_ns: u64,
     last_ts_ns: u64,
+    /// 1-second ack buckets across the whole run, for peak (max) TPS.
+    tps_counter: TpsCounter,
+    /// Identity hashes of every event already counted for this run. Telemetry
+    /// is delivered at-least-once (Kafka auto-commit + `earliest`), so after an
+    /// ingester crash the broker re-delivers events; without this set a
+    /// re-delivered ack would double-count `peak_tps` and inflate the percentile
+    /// sample set that feeds the live leaderboard. Deduping here makes the
+    /// aggregate idempotent under re-delivery. Bounded by the run's event count
+    /// (cleared when the run is finalized). The set's keys are already uniform
+    /// 64-bit hashes, so its hasher is a pass-through: SipHashing them a second
+    /// time was measured at ~half the dedup cost (the full fix — ahash identity
+    /// + identity set — took the path from 10.6-11.0 to 29.0-29.5 Mevents/s;
+    /// either half alone gives only ~1.4x).
+    seen: HashSet<u64, BuildHasherDefault<IdentityHasher>>,
+    /// Keyed hasher for event identities, fixed for the run's lifetime so a
+    /// re-delivered event always collides with its first delivery.
+    identity: ahash::RandomState,
+    /// How many re-delivered duplicates were dropped (surfaced in the summary
+    /// so at-least-once re-delivery is observable, not silent).
+    duplicates_dropped: u64,
+}
+
+impl RunState {
+    fn new() -> Self {
+        Self {
+            bots: HashMap::new(),
+            first_ts_ns: 0,
+            last_ts_ns: 0,
+            // Window large enough to retain every 1s bucket of any realistic
+            // benchmark run, so peak_tps() is the true per-second maximum.
+            tps_counter: TpsCounter::new(4096),
+            seen: HashSet::default(),
+            identity: ahash::RandomState::new(),
+            duplicates_dropped: 0,
+        }
+    }
+}
+
+/// Pass-through hasher for keys that are already uniform u64 hashes.
+#[derive(Default)]
+struct IdentityHasher(u64);
+
+impl Hasher for IdentityHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, _bytes: &[u8]) {
+        unreachable!("identity hasher is only for u64 keys")
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n;
+    }
+}
+
+/// A stable identity for a telemetry event, hashing every field. Kafka
+/// re-delivery hands back the byte-identical event, so its identity collides
+/// and we drop it; two genuinely distinct events differ in at least one field
+/// (`seq_no`, `recv_ts_ns`, …) so they hash apart and are both kept — including
+/// the multiple partial fills of one order, which share a `client_order_id` but
+/// arrive at distinct `recv_ts_ns`.
+fn event_identity(rs: &ahash::RandomState, e: &TelemetryEvent) -> u64 {
+    // ahash instead of the std SipHash DefaultHasher: same full-field identity,
+    // measured 37ns -> 9ns per event on the realistic event shape.
+    rs.hash_one((
+        &e.run_id,
+        &e.bot_id,
+        &e.client_order_id,
+        e.seq_no,
+        event_kind_tag(&e.event_type),
+        e.send_ts_ns,
+        e.recv_ts_ns,
+        e.latency_ns,
+    ))
+}
+
+fn event_kind_tag(k: &EventKind) -> u8 {
+    match k {
+        EventKind::OrderSent => 0,
+        EventKind::AckReceived => 1,
+        EventKind::FillReceived => 2,
+        EventKind::Timeout => 3,
+        EventKind::Error => 4,
+    }
 }
 
 struct BotState {
@@ -54,7 +138,17 @@ impl Aggregator {
                 return;
             }
         }
-        let run = self.runs.entry(event.run_id.clone()).or_default();
+        let run = self
+            .runs
+            .entry(event.run_id.clone())
+            .or_insert_with(RunState::new);
+        // Idempotency gate: drop at-least-once re-deliveries so they can't
+        // double-count peak_tps or inflate the percentile sample set.
+        let identity = event_identity(&run.identity, event);
+        if !run.seen.insert(identity) {
+            run.duplicates_dropped += 1;
+            return;
+        }
         // Only wallclock-truthy events (Ack/Fill carry real recv_ts_ns)
         // contribute to the run window. order_sent's send_ts_ns is the
         // engine-domain timestamp baked into the order, not real time.
@@ -71,6 +165,10 @@ impl Aggregator {
             if ts > run.last_ts_ns {
                 run.last_ts_ns = ts;
             }
+        }
+        // An ack is one completed transaction; bucket it for peak TPS.
+        if event.recv_ts_ns > 0 && matches!(event.event_type, EventKind::AckReceived) {
+            run.tps_counter.record(event.recv_ts_ns);
         }
         let bot = run.bots.entry(event.bot_id.clone()).or_default();
         match event.event_type {
@@ -92,6 +190,8 @@ impl Aggregator {
         for (run_id, state) in self.runs.into_iter() {
             let duration_ns = state.last_ts_ns.saturating_sub(state.first_ts_ns);
             let duration_secs = (duration_ns as f64 / 1_000_000_000.0).max(0.001);
+            let peak_tps = state.tps_counter.peak_tps() as f64;
+            let duplicates_dropped = state.duplicates_dropped;
 
             let mut totals = BotTotals::default();
             let mut bots: Vec<BotSummary> = Vec::with_capacity(state.bots.len());
@@ -136,10 +236,12 @@ impl Aggregator {
                 timeouts: totals.timeouts,
                 errors: totals.errors,
                 tps: totals.acks_received as f64 / duration_secs,
+                peak_tps,
                 p50_ms: p50,
                 p90_ms: p90,
                 p99_ms: p99,
                 p999_ms: p999,
+                duplicates_dropped,
                 bots,
             });
         }
@@ -197,10 +299,15 @@ pub struct RunAggregate {
     pub timeouts: u64,
     pub errors: u64,
     pub tps: f64,
+    pub peak_tps: f64,
     pub p50_ms: f64,
     pub p90_ms: f64,
     pub p99_ms: f64,
     pub p999_ms: f64,
+    /// At-least-once re-deliveries dropped by the idempotency gate. 0 in the
+    /// happy path; non-zero after an ingester restart re-reads committed-but-
+    /// reprocessed offsets — proof the dedup is doing its job.
+    pub duplicates_dropped: u64,
     pub bots: Vec<BotSummary>,
 }
 
@@ -259,5 +366,40 @@ mod tests {
         let summary = agg.finalize();
         assert_eq!(summary.runs.len(), 1);
         assert_eq!(summary.runs[0].run_id, "r1");
+    }
+
+    #[test]
+    fn dedups_redelivered_events() {
+        // Simulate Kafka re-delivery: the SAME ack event recorded three times
+        // (the byte-identical event the broker re-delivers after a crash).
+        let mut agg = Aggregator::new(None);
+        let ack = evt("r1", "b1", EventKind::AckReceived, 1_000_000);
+        agg.record(&ack);
+        agg.record(&ack); // duplicate
+        agg.record(&ack); // duplicate
+        let summary = agg.finalize();
+        let r = &summary.runs[0];
+        // Counted exactly once despite three deliveries; the two extras are
+        // reported, not silently absorbed.
+        assert_eq!(r.acks_received, 1);
+        assert_eq!(r.peak_tps, 1.0);
+        assert_eq!(r.duplicates_dropped, 2);
+    }
+
+    #[test]
+    fn keeps_distinct_partial_fills_of_one_order() {
+        // Two partial fills of the same order share a client_order_id but arrive
+        // at distinct recv_ts_ns — they must NOT be treated as duplicates.
+        let mut agg = Aggregator::new(None);
+        let mut fill_a = evt("r1", "b1", EventKind::FillReceived, 0);
+        fill_a.recv_ts_ns = 1_000;
+        let mut fill_b = evt("r1", "b1", EventKind::FillReceived, 0);
+        fill_b.recv_ts_ns = 2_000; // a later, distinct fill of the same order
+        agg.record(&fill_a);
+        agg.record(&fill_b);
+        let summary = agg.finalize();
+        let r = &summary.runs[0];
+        assert_eq!(r.fills_received, 2);
+        assert_eq!(r.duplicates_dropped, 0);
     }
 }

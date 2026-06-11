@@ -169,6 +169,13 @@ func (m *Manager) CancelRun(ctx context.Context, runID string) (*model.Benchmark
 	return run, nil
 }
 
+// Shutdown cancels every in-flight run so its goroutine unwinds and persists a
+// terminal (cancelled) state instead of being orphaned past process exit, then
+// waits — bounded by ctx — for those goroutines to drain. Run contexts are
+// rooted at context.Background() (so a transient worker hiccup can't kill a
+// healthy run), which is exactly why they need an explicit cancel on SIGTERM:
+// without this, a `kill` mid-run leaves a goroutine (and its child engine
+// process) running detached and the run wedged mid-"building" on disk.
 func (m *Manager) Shutdown(ctx context.Context) {
 	m.mu.Lock()
 	inflight := len(m.cancels)
@@ -191,7 +198,6 @@ func (m *Manager) Shutdown(ctx context.Context) {
 			slog.Info("orchestrator shutdown: all runs drained")
 			return
 		}
-
 		select {
 		case <-ctx.Done():
 			slog.Warn("orchestrator shutdown grace elapsed with runs still draining", "remaining", remaining)
@@ -250,6 +256,7 @@ func (m *Manager) BenchmarkEndpoint(ctx context.Context, req model.DirectBenchma
 	if err != nil {
 		return m.finishDirectFailure(runCtx, run, "BENCHMARKING", err, metrics, nil, nil), nil
 	}
+	mergeResourceSample(run.ArtifactDir, metrics)
 
 	store.Touch(run, model.RunStatusValidating)
 	_ = m.writeRunSpec(run)
@@ -358,6 +365,7 @@ func (m *Manager) execute(ctx context.Context, run *model.BenchmarkRun) {
 		m.fail(ctx, run, "BENCHMARKING", err)
 		return
 	}
+	mergeResourceSample(run.ArtifactDir, metrics)
 
 	if err := m.transition(ctx, run, model.RunStatusValidating); err != nil {
 		m.fail(ctx, run, "VALIDATING", err)
@@ -443,15 +451,33 @@ func (m *Manager) transition(ctx context.Context, run *model.BenchmarkRun, statu
 	return m.store.SaveRun(ctx, run)
 }
 
+// Defense-in-depth load ceilings, mirrored from the submission-api. The values
+// flow straight into the bot-fleet spawn, so clamp them here too in case a run
+// reaches the orchestrator by any path other than the submission API.
+const (
+	maxBotCount    = 5000
+	maxRatePerBot  = 2000
+	maxDurationSec = 300
+)
+
 func normalizeConfig(config *model.BenchmarkRunConfig) {
 	if config.BotCount <= 0 {
 		config.BotCount = 10
 	}
+	if config.BotCount > maxBotCount {
+		config.BotCount = maxBotCount
+	}
 	if config.RatePerBot <= 0 {
 		config.RatePerBot = 2
 	}
+	if config.RatePerBot > maxRatePerBot {
+		config.RatePerBot = maxRatePerBot
+	}
 	if config.DurationSec <= 0 {
 		config.DurationSec = 5
+	}
+	if config.DurationSec > maxDurationSec {
+		config.DurationSec = maxDurationSec
 	}
 	if config.WarmupSec < 0 {
 		config.WarmupSec = 0
@@ -479,6 +505,29 @@ func (m *Manager) fail(ctx context.Context, run *model.BenchmarkRun, stage strin
 	_ = m.store.SaveRun(context.Background(), run)
 	_ = appendRunLog(run, fmt.Sprintf("run stopped at %s: %s", stage, run.FailureReason))
 	slog.Error("orchestrator run stopped", "run_id", run.RunID, "status", run.Status, "stage", stage, "err", err)
+}
+
+// mergeResourceSample folds the sandbox's resource.json (peak CPU%/memory of
+// the contestant engine, written into the artifact dir by the sandbox sampler)
+// into the metrics so the scorer's 10% resource term is real. Absent or
+// unparseable -> left at zero, which the scorer treats as neutral (100), so a
+// missing sample never penalises an engine.
+func mergeResourceSample(artifactDir string, metrics *model.Metrics) {
+	if metrics == nil || artifactDir == "" {
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(artifactDir, "resource.json"))
+	if err != nil {
+		return
+	}
+	var sample struct {
+		CPUPctPeak float64 `json:"cpu_pct_peak"`
+		MemMBPeak  float64 `json:"mem_mb_peak"`
+	}
+	if json.Unmarshal(data, &sample) == nil {
+		metrics.CPUPctPeak = sample.CPUPctPeak
+		metrics.MemMBPeak = sample.MemMBPeak
+	}
 }
 
 func (m *Manager) writeRunSpec(run *model.BenchmarkRun) error {

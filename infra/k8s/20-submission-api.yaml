@@ -1,0 +1,46 @@
+# Submission API: accepts contestant uploads, stores artifacts, queues runs.
+# Artifacts use an emptyDir here; production points at S3/MinIO (proto
+# SubmissionArtifact.uri already models an object-store URI).
+apiVersion: v1
+kind: Service
+metadata:
+  name: submission-api
+  namespace: iicpc
+  labels: { app: submission-api }
+spec:
+  selector: { app: submission-api }
+  ports:
+    - { name: http, port: 9100, targetPort: 9100 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: submission-api
+  namespace: iicpc
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: submission-api } }
+  template:
+    metadata:
+      labels: { app: submission-api }
+    spec:
+      containers:
+        - name: submission-api
+          image: ghcr.io/iicpc/submission-api:latest
+          env:
+            - { name: SUBMISSION_API_ADDR, value: ":9100" }
+            - { name: REPO_ROOT, value: "/data" }
+          ports:
+            - { name: http, containerPort: 9100 }
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits: { cpu: "1", memory: "512Mi" }
+          readinessProbe:
+            httpGet: { path: /health, port: 9100 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          volumeMounts:
+            - { name: artifacts, mountPath: /data }
+      volumes:
+        - name: artifacts
+          emptyDir: {}

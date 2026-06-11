@@ -1,0 +1,44 @@
+# Orchestrator: drives the benchmark lifecycle state machine
+# (QUEUED -> BUILDING -> SANDBOX_STARTING -> HEALTHCHECKING -> BENCHMARKING ->
+#  VALIDATING -> SCORING -> FINISHED) by calling submission-api, sandbox-runner,
+# and launching the bot-fleet Job per run.
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator
+  namespace: iicpc
+  labels: { app: orchestrator }
+spec:
+  selector: { app: orchestrator }
+  ports:
+    - { name: http, port: 9300, targetPort: 9300 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: iicpc
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: orchestrator } }
+  template:
+    metadata:
+      labels: { app: orchestrator }
+    spec:
+      serviceAccountName: sandbox-orchestrator
+      containers:
+        - name: orchestrator
+          image: ghcr.io/iicpc/orchestrator:latest
+          env:
+            - { name: ORCHESTRATOR_ADDR, value: ":9300" }
+            - { name: SANDBOX_RUNNER_URL, value: "http://sandbox-runner.iicpc.svc.cluster.local:9200" }
+            - { name: SUBMISSION_API_URL, value: "http://submission-api.iicpc.svc.cluster.local:9100" }
+          ports:
+            - { name: http, containerPort: 9300 }
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits: { cpu: "1", memory: "512Mi" }
+          readinessProbe:
+            httpGet: { path: /health, port: 9300 }
+            initialDelaySeconds: 3
+            periodSeconds: 5

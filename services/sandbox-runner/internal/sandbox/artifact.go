@@ -77,10 +77,16 @@ func prepareBuildContext(src string, dst string, language string) error {
 	return nil
 }
 
+// writeDefaultDockerfile emits a hardened multi-stage Dockerfile when the
+// contestant did not ship their own. Each language follows a documented
+// convention so the resulting image exposes the engine on :8080. Contestants
+// who need anything custom simply include a Dockerfile in their artifact, which
+// always takes precedence (see prepareBuildContext).
 func writeDefaultDockerfile(dir string, language string) error {
-	switch language {
+	var content string
+	switch strings.ToLower(strings.TrimSpace(language)) {
 	case "", "go":
-		return os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(`FROM golang:1.22-alpine AS build
+		content = `FROM golang:1.22-alpine AS build
 WORKDIR /src
 COPY . .
 RUN go mod tidy
@@ -91,11 +97,71 @@ WORKDIR /app
 COPY --from=build /engine /engine
 EXPOSE 8080
 ENTRYPOINT ["/engine"]
-`), 0o644)
+`
+	case "rust":
+		// Convention: the crate produces exactly one binary; we take the first
+		// top-level executable in target/release as the engine.
+		content = `FROM rust:1-slim AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release --locked || cargo build --release
+RUN mkdir -p /out && \
+    find target/release -maxdepth 1 -type f -perm -111 ! -name '*.d' -exec cp {} /out/engine \; -quit
+
+FROM debian:stable-slim
+WORKDIR /app
+COPY --from=build /out/engine /engine
+EXPOSE 8080
+ENTRYPOINT ["/engine"]
+`
+	case "cpp", "c++", "cxx":
+		// Convention: CMake target or Makefile producing a binary, else all
+		// translation units are compiled straight to /engine.
+		content = `FROM gcc:13 AS build
+WORKDIR /src
+COPY . .
+RUN set -eux; \
+    if [ -f CMakeLists.txt ]; then \
+        apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*; \
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j; \
+        find build -maxdepth 3 -type f -perm -111 -exec cp {} /engine \; -quit; \
+    elif [ -f Makefile ]; then \
+        make && cp engine /engine; \
+    else \
+        g++ -O2 -std=c++20 -pthread -o /engine $(find . -name '*.cpp' -o -name '*.cc'); \
+    fi
+
+FROM debian:stable-slim
+WORKDIR /app
+COPY --from=build /engine /engine
+EXPOSE 8080
+ENTRYPOINT ["/engine"]
+`
+	case "binary", "bin":
+		// Pre-compiled Linux binary shipped in the artifact as `engine`.
+		content = `FROM debian:stable-slim
+WORKDIR /app
+COPY engine /engine
+RUN chmod +x /engine
+EXPOSE 8080
+ENTRYPOINT ["/engine"]
+`
 	default:
-		return fmt.Errorf("no default Dockerfile for language %q; include a Dockerfile in the artifact", language)
+		return fmt.Errorf("no default Dockerfile for language %q; supported: go, rust, cpp, binary — or include a Dockerfile in the artifact", language)
 	}
+	return os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(content), 0o644)
 }
+
+// Untrusted archive limits: a contestant ZIP (capped at 64 MiB on upload) must
+// not be able to exhaust the host's inodes or disk during extraction. Cap the
+// entry count, the per-entry declared compression ratio, and the total
+// uncompressed bytes actually written (a classic zip bomb expands a few MiB to
+// tens of GB).
+const (
+	maxZipEntries    = 10000
+	maxZipRatio      = 200
+	maxZipTotalBytes = 512 << 20 // 512 MiB uncompressed across the whole archive
+)
 
 func unzip(src string, dst string) error {
 	reader, err := zip.OpenReader(src)
@@ -104,6 +170,11 @@ func unzip(src string, dst string) error {
 	}
 	defer reader.Close()
 
+	if len(reader.File) > maxZipEntries {
+		return fmt.Errorf("zip has too many entries (%d > %d)", len(reader.File), maxZipEntries)
+	}
+
+	var total int64
 	for _, file := range reader.File {
 		target := filepath.Join(dst, file.Name)
 		cleanDst, err := filepath.Abs(dst)
@@ -123,6 +194,10 @@ func unzip(src string, dst string) error {
 			}
 			continue
 		}
+		// Cheap screen: reject an entry whose declared ratio is absurd.
+		if file.CompressedSize64 > 0 && file.UncompressedSize64/file.CompressedSize64 > maxZipRatio {
+			return fmt.Errorf("zip entry %q exceeds max compression ratio", file.Name)
+		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
@@ -130,10 +205,16 @@ func unzip(src string, dst string) error {
 		if err != nil {
 			return err
 		}
-		err = copyReaderToFile(srcFile, target, file.FileInfo().Mode())
+		// Hard cap on bytes actually written, so a lying header can't slip the
+		// declared-size screen above. +1 so hitting the cap exactly still trips.
+		written, err := copyReaderToFile(io.LimitReader(srcFile, maxZipTotalBytes-total+1), target, file.FileInfo().Mode())
 		_ = srcFile.Close()
 		if err != nil {
 			return err
+		}
+		total += written
+		if total > maxZipTotalBytes {
+			return fmt.Errorf("zip expands beyond %d bytes; refusing to extract", int64(maxZipTotalBytes))
 		}
 	}
 	return nil
@@ -173,20 +254,22 @@ func copyFile(src string, dst string) error {
 		return err
 	}
 	defer srcFile.Close()
-	return copyReaderToFile(srcFile, dst, info.Mode())
+	_, err = copyReaderToFile(srcFile, dst, info.Mode())
+	return err
 }
 
-func copyReaderToFile(src io.Reader, dst string, mode os.FileMode) error {
+// copyReaderToFile streams src to dst and returns the number of bytes written
+// so callers extracting untrusted archives can enforce a cumulative size cap.
+func copyReaderToFile(src io.Reader, dst string, mode os.FileMode) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
+		return 0, err
 	}
 	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer dstFile.Close()
-	_, err = io.Copy(dstFile, src)
-	return err
+	return io.Copy(dstFile, src)
 }
 
 func fileExists(path string) bool {

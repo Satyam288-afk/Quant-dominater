@@ -20,15 +20,19 @@ func NewValidator(repoRoot string) *Validator {
 }
 
 func (v *Validator) Run(ctx context.Context, run *model.BenchmarkRun) (*model.ValidationResult, error) {
-	output := runLoggedCommand(
-		ctx,
-		run,
-		v.repoRoot,
-		"cargo",
-		"run", "-p", "validator", "--",
+	validatorArgs := []string{
 		"--events", filepath.Join(run.ArtifactDir, "events.jsonl"),
 		"--contestant-outputs", filepath.Join(run.ArtifactDir, "contestant_outputs.jsonl"),
-	)
+	}
+	// Same policy as the fleet spawn: never pay a cargo compile inside the
+	// judged pipeline when a release binary is already built.
+	command := filepath.Join(v.repoRoot, "target", "release", "validator")
+	args := validatorArgs
+	if _, err := os.Stat(command); err != nil {
+		command = "cargo"
+		args = append([]string{"run", "-p", "validator", "--"}, validatorArgs...)
+	}
+	output := runLoggedCommand(ctx, run, v.repoRoot, command, args...)
 
 	stdout := strings.TrimSpace(output.Stdout)
 	if stdout == "" {

@@ -1,21 +1,36 @@
 # IICPC Benchmark Platform
 
-Vertical-slice implementation for the IICPC distributed trading engine benchmark.
-
-This repo started with the smallest working benchmark core and now layers Go
-control-plane services on top of it:
+A distributed benchmarking & hosting platform that evaluates contestant-submitted
+trading engines: **Code Upload → Containerized Deployment → Distributed Load Test
+→ Real-Time Scoring**.
 
 ```text
-Stub trading engine
-  -> Rust bot fleet sends deterministic orders
-  -> local JSONL telemetry captures latency/TPS
-  -> Rust reference orderbook replays inputs
-  -> validator prints VALID / INVALID
+contestant engine (sandboxed)  ◀── ws orders/acks/fills ──  Rust bot fleet (10k+ bots)
+        │                                                          │ TelemetryEvent
+        │ correctness                                              ▼
+   reference orderbook ── validator ──┐                    Redpanda (Kafka)
+        (price-time priority)         │                           │
+                                      ▼                           ▼ consumer group
+                                  score-engine ◀── metrics ── telemetry-ingester
+                                      │                       │            │
+                                      ▼                       ▼            ▼
+                            Redis ZSET + scorecard      TimescaleDB     Redis live
+                                      │
+                                      ▼
+                          leaderboard-api ── WebSocket ──▶ live web UI
 ```
 
-Kubernetes, Terraform, Redpanda, Redis, and MinIO are later layers. The current
-milestone is a real local platform loop: submission metadata, sandbox boundary,
-orchestration, benchmark execution, validation, and scoring artifacts.
+It runs three ways: a **dependency-free local slice** (JSONL files), a **full
+local data plane** (Redpanda + TimescaleDB + Redis via docker-compose), and a
+**cloud cell** (Terraform EKS + `kubectl apply -k`).
+
+## Hackathon Deliverables
+
+| Deliverable | Where |
+|---|---|
+| **1. Working prototype** (upload → deploy → load test → scoring) | `services/*`, `rust/*`, `web/`, `scripts/run-live-demo.sh` — measured numbers in [docs/BENCHMARK_RESULTS.md](docs/BENCHMARK_RESULTS.md) (~50k orders/s driven, p99 + peak-TPS curve, correctness held over 191k fills) |
+| **2. Architecture Blueprint** | [docs/BLUEPRINT.md](docs/BLUEPRINT.md) (+ ARCHITECTURE, API_CONTRACT, SCORING, SECURITY_SANDBOX, [RESILIENCE](docs/RESILIENCE.md), [PROFILING](docs/PROFILING.md)) |
+| **3. Infrastructure as Code** | [infra/k8s](infra/k8s) (32 validated resources, HPA, NetworkPolicy), [infra/terraform](infra/terraform) (EKS/ECR/VPC), [infra/docker-compose](infra/docker-compose) |
 
 ## Current Components
 
@@ -36,9 +51,17 @@ orchestration, benchmark execution, validation, and scoring artifacts.
 | `rust/reference-orderbook` | Deterministic price-time reference matcher |
 | `rust/validator` | Replays inputs and compares contestant fills |
 | `services/control-panel` | Go API for creating and tracking local benchmark runs |
+| `rust/telemetry-ingester` | Rust Kafka consumer → percentiles → TimescaleDB + Redis |
+| `web` | React/TS real-time leaderboard UI (WebSocket) |
+| `infra/k8s` | Kubernetes benchmark cell (deployments, HPA, NetworkPolicy) |
+| `infra/terraform` | Terraform: AWS VPC + EKS + ECR |
+| `infra/docker-compose` | Redpanda + TimescaleDB + Redis for the full local data plane |
+| `docs/BLUEPRINT.md` | Comprehensive architecture blueprint |
 | `fixtures` | Tiny validation fixtures |
-| `scripts/run-local-demo.sh` | One-command local slice demo |
+| `scripts/run-local-demo.sh` | One-command local slice demo (JSONL) |
+| `scripts/run-live-demo.sh` | Full data-plane demo (Redpanda→Timescale→Redis→leaderboard) |
 | `scripts/run-price-time-proof.sh` | Correct engine vs intentionally broken engine proof |
+| `scripts/run-chaos-demo.sh` | Failure-injection demo: kill the engine mid-run → fleet reconnects; SIGTERM a service → graceful drain (no Docker needed) |
 | `scripts/run-platform-demo.sh` | Submission-to-leaderboard local platform demo |
 | `scripts/run-console-stack.sh` | Interactive browser console stack |
 
@@ -59,7 +82,7 @@ Terminal 1:
 
 ```bash
 cd examples/stub-engine
-go run . --addr :8080 --events engine-events.jsonl
+go run . --addr :8080 --engine mutex --events engine-events.jsonl
 ```
 
 Terminal 2:
@@ -164,6 +187,57 @@ Use Docker-backed sandboxing when Docker is running:
 
 ```bash
 SANDBOX_RUNNER_MODE=docker make sandbox-runner
+```
+
+## Run The Full Live Data Plane
+
+Brings up Redpanda + TimescaleDB + Redis, runs the fleet with the live backend,
+ingests telemetry into Timescale/Redis, scores it, and serves the live
+leaderboard (requires Docker):
+
+```bash
+make live-demo        # ./scripts/run-live-demo.sh
+```
+
+The script publishes telemetry to Redpanda, the ingester writes `metrics_raw`
+(Timescale) + live run metrics (Redis), the score-engine writes the
+`leaderboard:global` ZSET + per-team scorecard, and the leaderboard-api serves
+them. The **full path is verified end-to-end** — a typical run lands ~11.5k
+events in Timescale, validates clean, and the leaderboard-api returns a scored
+entry, e.g.:
+
+```json
+{"run_id":"run_20260610_092925","team_id":"team_demo","score":78.35,"valid":true,
+ "p99_ms":56.4,"tps":260.9,"peak_tps":251,"throughput_score":100,"latency_score":45.87,
+ "stability_score":100,"resource_score":100,"orders_sent":1300,"acks_received":1300}
+```
+
+Each invocation uses a fresh `run_id` so a previous run's rows can't pollute the
+new run's throughput/latency. (Tip: `CARGO_PROFILE=debug make live-demo` skips
+the release build for a faster loop.)
+
+## Run The Leaderboard UI
+
+```bash
+# 1) leaderboard-api in redis mode
+cd services/leaderboard-api && LEADERBOARD_BACKEND=redis REDIS_URL=redis://localhost:56379/ go run .
+# 2) the web app (proxies /leaderboard, /runs, /ws to :9500)
+make web    # http://localhost:5173
+```
+
+## Validate The Infrastructure (no cloud / cluster needed)
+
+```bash
+make k8s-validate   # render with kustomize + kubeconform (strict, k8s 1.30)
+make tf-validate    # tofu/terraform fmt + init -backend=false + validate
+```
+
+Deploy to a real cluster:
+
+```bash
+cd infra/terraform && tofu init && tofu apply      # VPC + EKS + ECR
+$(cd infra/terraform && tofu output -raw configure_kubectl)
+kubectl apply -k infra/k8s                          # the benchmark cell
 ```
 
 In Docker mode, `network_egress=false` creates a per-sandbox internal Docker
@@ -288,28 +362,43 @@ run_id: run_local_001
 bots: 100
 orders_sent: 30000
 acks_received: 30000
-fills_received: 15000
+fills_received: 24380
 timeouts: 0
 connect_errors: 0
-tps: 500.0
-p50: 1.2ms
-p90: 3.8ms
-p99: 11.4ms
+tps: 501.7
+peak_tps: 540
+p50: 0.3ms
+p90: 0.6ms
+p99: 1.5ms
 events_out: events.jsonl
 outputs_out: contestant_outputs.jsonl
 ```
 
-## Implementation Priority
+The numbers above were measured with the `--engine mutex` core the quickstart
+launches — engine choice and quoted numbers must stay paired: at this unpooled
+100-connection shape the mutex core measures *better* than the disruptor,
+which earns its keep under the pooled, high-rate shapes the demo scripts use
+(see [docs/PROFILING.md](docs/PROFILING.md)).
 
-1. API contract
-2. stub engine
-3. bot fleet
-4. latency measurement
-5. reference orderbook
-6. validator
-7. telemetry stream
-8. leaderboard
-9. submission API
-10. sandbox runner
-11. orchestrator
-12. Kubernetes/Terraform
+`tps` is the average; `peak_tps` is the busiest 1-second window (the brief's
+"max TPS before failure"). The fleet sends a realistic mix — **limit** orders
+across a multi-level price ladder, **market** orders, and **cancels** of resting
+orders — over a connection pool, with many bots sharing symbols so they trade
+against each other. Flags: `--symbols`, `--price-levels`, `--qty-max`,
+`--market-per-mille`, `--cancel-per-mille`, `--ws-connections`, `--pod-index`.
+
+## Implementation Status
+
+1. ✅ API contract
+2. ✅ stub engine (limit + market + cancel matching); two interchangeable cores — `--engine mutex` (sharded per-symbol locks, default) and `--engine disruptor` (lock-free LMAX-style MPSC ring + single matcher per shard, ~2× lower p99) — see [docs/PROFILING.md](docs/PROFILING.md)
+3. ✅ bot fleet (pooled, 10k bots): limit/market/cancel orders, price-ladder depth, shared symbols → real cross-bot trading; globally-unique IDs across pods (`--pod-index`); **resilient** — a dropped pooled connection auto-reconnects with capped exponential backoff and resumes on the same channels, so the fleet survives an engine blip mid-run (recovery surfaced as `reconnects: N`)
+4. ✅ latency (p50/p90/p99/p999) + throughput (avg **and** peak TPS = max acks in any 1s window) + **per-second latency/TPS time-series** (`GET /runs/{id}/timeseries`, computed from Timescale) so you can watch p99 degrade under load
+5. ✅ reference orderbook (price-time priority, market & cancel)
+6. ✅ validator (+ proof): replays in the engine's **accepted arrival order** (ack `engine_seq`), so a correct engine validates clean under concurrent multi-bot load; market & cancel aware
+7. ✅ telemetry stream (Redpanda → ingester → Timescale + Redis), peak-TPS aggregation; **idempotent under at-least-once re-delivery** (aggregator dedups on a full-event identity hash → `duplicates_dropped` in the summary; proven: feeding the stream twice yields identical counts) + **graceful SIGTERM** (commits the Kafka offset, drains the in-flight buffer)
+8. ✅ leaderboard (Redis ZSET + WebSocket API + live web UI with score breakdown, avg/peak TPS, and a **per-run p99-latency sparkline** that shows degradation over time); **graceful SIGTERM shutdown** (drains HTTP, Close-frames WS clients, releases Redis) + a **dependency-aware `/ready`** probe that flips to 503 on stale Redis while `/health` (liveness) stays green
+9. ✅ submission API
+10. ✅ sandbox runner (hardened: cpu-pin on Linux/quota fallback on Docker Desktop, ro-rootfs, caps dropped, NetworkPolicy; go/rust/cpp/binary builds)
+11. ✅ orchestrator (lifecycle FSM) with **graceful SIGTERM shutdown** — stops the claim worker, drains HTTP, and cancels in-flight runs (which previously ran off `context.Background()` and survived a kill); same `signal.NotifyContext` + `srv.Shutdown` drain added to submission-api / sandbox-runner / control-panel
+12. ✅ Kubernetes (validated cell + HPA) / Terraform (EKS/ECR/VPC)
+13. ✅ resilience & failure-mode doc ([docs/RESILIENCE.md](docs/RESILIENCE.md)) + a dependency-free **chaos demo** ([scripts/run-chaos-demo.sh](scripts/run-chaos-demo.sh)) that injects an engine crash (fleet reconnects) and a SIGTERM (graceful drain) and asserts recovery

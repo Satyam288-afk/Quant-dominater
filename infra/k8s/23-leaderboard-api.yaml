@@ -1,0 +1,70 @@
+# Leaderboard API: serves the live ranking from Redis and fans it out over
+# WebSocket to the frontend. Horizontally scalable (stateless; reads Redis) and
+# exposed externally via a LoadBalancer for the web UI.
+apiVersion: v1
+kind: Service
+metadata:
+  name: leaderboard-api
+  namespace: iicpc
+  labels: { app: leaderboard-api }
+spec:
+  selector: { app: leaderboard-api }
+  ports:
+    - { name: http, port: 9500, targetPort: 9500 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: leaderboard-api-lb
+  namespace: iicpc
+  labels: { app: leaderboard-api }
+spec:
+  type: LoadBalancer
+  selector: { app: leaderboard-api }
+  ports:
+    - { name: http, port: 80, targetPort: 9500 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: leaderboard-api
+  namespace: iicpc
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: leaderboard-api } }
+  template:
+    metadata:
+      labels: { app: leaderboard-api }
+    spec:
+      containers:
+        - name: leaderboard-api
+          image: ghcr.io/iicpc/leaderboard-api:latest
+          envFrom:
+            - configMapRef: { name: platform-config }
+          ports:
+            - { name: http, containerPort: 9500 }
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits: { cpu: "1", memory: "512Mi" }
+          readinessProbe:
+            httpGet: { path: /health, port: 9500 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: leaderboard-api
+  namespace: iicpc
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: leaderboard-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }

@@ -20,6 +20,9 @@ type Metrics struct {
 	ConnectErrors int     `json:"connect_errors"`
 	TPS           float64 `json:"tps"`
 	P99MS         float64 `json:"p99_ms,omitempty"`
+	// Peak resource usage of the contestant engine (0 = not measured).
+	CPUPctPeak float64 `json:"cpu_pct_peak,omitempty"`
+	MemMBPeak  float64 `json:"mem_mb_peak,omitempty"`
 }
 
 type ValidationResult struct {

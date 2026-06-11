@@ -11,22 +11,26 @@ import (
 )
 
 type Entry struct {
-	RunID           string    `json:"run_id"`
-	TeamID          string    `json:"team_id"`
-	Score           float64   `json:"score"`
-	Valid           bool      `json:"valid"`
-	Status          string    `json:"status,omitempty"`
-	FailureReason   string    `json:"failure_reason,omitempty"`
-	OrdersSent      int       `json:"orders_sent,omitempty"`
-	AcksReceived    int       `json:"acks_received,omitempty"`
-	FillsReceived   int       `json:"fills_received,omitempty"`
-	Timeouts        int       `json:"timeouts,omitempty"`
-	ConnectErrors   int       `json:"connect_errors,omitempty"`
-	FillsChecked    int       `json:"fills_checked,omitempty"`
-	P50MS           float64   `json:"p50_ms,omitempty"`
-	P90MS           float64   `json:"p90_ms,omitempty"`
-	P99MS           float64   `json:"p99_ms,omitempty"`
-	TPS             float64   `json:"tps,omitempty"`
+	RunID         string  `json:"run_id"`
+	TeamID        string  `json:"team_id"`
+	Score         float64 `json:"score"`
+	Valid         bool    `json:"valid"`
+	Status        string  `json:"status,omitempty"`
+	FailureReason string  `json:"failure_reason,omitempty"`
+	OrdersSent    int     `json:"orders_sent,omitempty"`
+	AcksReceived  int     `json:"acks_received,omitempty"`
+	FillsReceived int     `json:"fills_received,omitempty"`
+	Timeouts      int     `json:"timeouts,omitempty"`
+	ConnectErrors int     `json:"connect_errors,omitempty"`
+	FillsChecked  int     `json:"fills_checked,omitempty"`
+	P50MS         float64 `json:"p50_ms,omitempty"`
+	P90MS         float64 `json:"p90_ms,omitempty"`
+	P99MS         float64 `json:"p99_ms,omitempty"`
+	P999MS        float64 `json:"p999_ms,omitempty"`
+	TPS           float64 `json:"tps,omitempty"`
+	PeakTPS       float64 `json:"peak_tps,omitempty"`
+	// Score breakdown — populated by the Redis backend from the score-engine
+	// scorecard so the leaderboard UI can render the composite components.
 	LatencyScore    float64   `json:"latency_score,omitempty"`
 	ThroughputScore float64   `json:"throughput_score,omitempty"`
 	StabilityScore  float64   `json:"stability_score,omitempty"`
@@ -107,10 +111,14 @@ func (b *Board) Subscribe() (<-chan []byte, func()) {
 	b.mu.Unlock()
 
 	ch <- payload
+	// cancel only unregisters; it must NOT close(ch). Upsert snapshots the
+	// subscriber list under the lock but sends after unlock, so a close here
+	// races that send (panic: send on closed channel, caught by go test
+	// -race). Nothing reads ch to EOF — the WS writer exits via its own
+	// context — so the unregistered channel is simply garbage collected.
 	cancel := func() {
 		b.mu.Lock()
 		delete(b.subscribers, ch)
-		close(ch)
 		b.mu.Unlock()
 	}
 	return ch, cancel

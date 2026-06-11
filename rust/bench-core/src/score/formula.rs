@@ -66,7 +66,9 @@ pub fn stability_score(orders_sent: i64, timeouts: i64, connect_errors: i64) -> 
 }
 
 pub fn resource_efficiency_score(cpu_pct: Option<f64>, mem_mb: Option<f64>) -> f64 {
-    // Until sandbox sampling lands we keep the same default as the Go scorer.
+    // The sandbox samples real peak usage (resource.json). None / <= 0 means
+    // "not measured" -> neutral 100, so a sampling miss never penalises an
+    // engine. Same curve as the Go scorer (scoring.go resourceScore).
     let cpu = match cpu_pct {
         Some(v) if v > 0.0 => v.min(100.0),
         _ => return 100.0,
@@ -87,7 +89,8 @@ pub fn compose(inputs: ScoreInputs) -> CompositeScore {
     let throughput = throughput_score(inputs.tps, inputs.expected_tps);
     let stability = stability_score(inputs.orders_sent, inputs.timeouts, inputs.connect_errors);
     let resource = resource_efficiency_score(inputs.cpu_pct, inputs.mem_mb);
-    let final_score = round2(0.40 * latency + 0.30 * throughput + 0.20 * stability + 0.10 * resource);
+    let final_score =
+        round2(0.40 * latency + 0.30 * throughput + 0.20 * stability + 0.10 * resource);
     CompositeScore {
         final_score,
         latency_score: latency,

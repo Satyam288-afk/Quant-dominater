@@ -35,6 +35,7 @@ type leaderboardEntry struct {
 	P90MS           float64   `json:"p90_ms,omitempty"`
 	P99MS           float64   `json:"p99_ms,omitempty"`
 	TPS             float64   `json:"tps,omitempty"`
+	PeakTPS         float64   `json:"peak_tps,omitempty"`
 	LatencyScore    float64   `json:"latency_score,omitempty"`
 	ThroughputScore float64   `json:"throughput_score,omitempty"`
 	StabilityScore  float64   `json:"stability_score,omitempty"`
@@ -82,6 +83,10 @@ func (p *LeaderboardPublisher) Publish(ctx context.Context, run *model.Benchmark
 		entry.P90MS = metrics.P90MS
 		entry.P99MS = metrics.P99MS
 		entry.TPS = metrics.TPS
+		entry.PeakTPS = metrics.PeakTPS
+		if entry.PeakTPS == 0 {
+			entry.PeakTPS = metrics.TPS
+		}
 	}
 	entry.LatencyScore = score.LatencyScore
 	entry.ThroughputScore = score.ThroughputScore

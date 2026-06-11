@@ -81,12 +81,18 @@ type Metrics struct {
 	Timeouts      int     `json:"timeouts"`
 	ConnectErrors int     `json:"connect_errors"`
 	TPS           float64 `json:"tps"`
+	PeakTPS       float64 `json:"peak_tps,omitempty"`
 	P50MS         float64 `json:"p50_ms,omitempty"`
 	P90MS         float64 `json:"p90_ms,omitempty"`
 	P99MS         float64 `json:"p99_ms,omitempty"`
-	EventsOut     string  `json:"events_out,omitempty"`
-	OutputsOut    string  `json:"outputs_out,omitempty"`
-	RawOutput     string  `json:"raw_output,omitempty"`
+	// Peak resource usage of the contestant engine during the run, sampled by
+	// the sandbox (cgroup-accurate in Docker mode, ps-based locally). Zero means
+	// "not measured" — the scorer then treats resource as neutral (100).
+	CPUPctPeak float64 `json:"cpu_pct_peak,omitempty"`
+	MemMBPeak  float64 `json:"mem_mb_peak,omitempty"`
+	EventsOut  string  `json:"events_out,omitempty"`
+	OutputsOut string  `json:"outputs_out,omitempty"`
+	RawOutput  string  `json:"raw_output,omitempty"`
 }
 
 type ValidationResult struct {

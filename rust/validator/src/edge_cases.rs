@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::replay::{Event, EventKind};
 use reference_orderbook::Fill;
@@ -26,31 +26,50 @@ pub fn detect(
 ) -> Vec<Violation> {
     let mut out = Vec::new();
 
-    // Known order ids and remaining qty per id (from new_order events).
+    // Known order ids and remaining qty per id (from new_order events). Cancels
+    // need no bookkeeping here — the diff validates them in arrival order.
     let mut placed_qty: HashMap<String, i64> = HashMap::new();
-    let mut cancelled_after_line: HashMap<String, usize> = HashMap::new();
     for ev in events {
-        match &ev.kind {
-            EventKind::NewOrder(order) => {
-                placed_qty.insert(order.client_order_id.clone(), order.qty);
-            }
-            EventKind::Cancel {
-                orig_client_order_id,
-            } => {
-                cancelled_after_line.insert(orig_client_order_id.clone(), ev.line_no);
-            }
+        if let EventKind::NewOrder(order) = &ev.kind {
+            placed_qty.insert(order.client_order_id.clone(), order.qty);
         }
     }
 
-    // DUPLICATE_FILL: any raw fill that the main loop discarded as a dupe.
-    if raw_actual.len() > deduped_actual.len() {
-        out.push(Violation {
-            reason: "DUPLICATE_FILL",
-            detail: json!({
-                "raw_count": raw_actual.len(),
-                "unique_count": deduped_actual.len(),
-            }),
-        });
+    // INCONSISTENT_FILL: a fill (identified by engine_seq) is reported to BOTH
+    // counterparties — and, through the bot fleet's connection pool, by every
+    // connection that carries one of those counterparties. So the SAME fill
+    // legitimately appears multiple times in contestant_outputs.jsonl; that is
+    // correct two-sided execution reporting, not a bug. We dedup those identical
+    // copies elsewhere by engine_seq. The real violation is when two reports
+    // share an engine_seq but DISAGREE on the trade (buy/sell/price/qty) — that
+    // means the engine emitted an inconsistent execution report. Only flag that.
+    let mut by_seq: HashMap<u64, &Fill> = HashMap::new();
+    for entry in raw_actual {
+        let Some(seq) = entry.engine_seq else {
+            continue;
+        };
+        match by_seq.get(&seq) {
+            Some(prev)
+                if prev.buy_order_id != entry.fill.buy_order_id
+                    || prev.sell_order_id != entry.fill.sell_order_id
+                    || prev.price != entry.fill.price
+                    || prev.qty != entry.fill.qty =>
+            {
+                out.push(Violation {
+                    reason: "INCONSISTENT_FILL",
+                    detail: json!({
+                        "engine_seq": seq,
+                        "first": prev,
+                        "second": entry.fill,
+                    }),
+                });
+                break;
+            }
+            Some(_) => {}
+            None => {
+                by_seq.insert(seq, &entry.fill);
+            }
+        }
     }
 
     // OUT_OF_ORDER_SEQ: engine_seq must be monotonically non-decreasing.
@@ -81,15 +100,43 @@ pub fn detect(
     let mut sell_filled: HashMap<String, i64> = HashMap::new();
     let mut unknown_id: Option<String> = None;
     let mut overfill: Option<(String, i64, i64)> = None;
+    let mut bad_qty: Option<(String, i64)> = None;
     for entry in deduped_actual {
         let f = &entry.fill;
+        // A fill qty must be positive. A zero/negative qty is malformed in its
+        // own right, and a negative one would also corrupt the cumulative
+        // totals below (a hostile engine could "subtract" its way out of an
+        // over-fill). Flag it and clamp its contribution to 0.
+        if f.qty <= 0 {
+            bad_qty.get_or_insert_with(|| {
+                let id = if f.buy_order_id.is_empty() {
+                    f.sell_order_id.clone()
+                } else {
+                    f.buy_order_id.clone()
+                };
+                (id, f.qty)
+            });
+        }
         for id in [&f.buy_order_id, &f.sell_order_id] {
             if !placed_qty.contains_key(id) {
                 unknown_id.get_or_insert_with(|| id.clone());
             }
         }
-        *buy_filled.entry(f.buy_order_id.clone()).or_insert(0) += f.qty;
-        *sell_filled.entry(f.sell_order_id.clone()).or_insert(0) += f.qty;
+        // saturating_add, not `+=`: a crafted fill qty near i64::MAX must not
+        // panic the (single-threaded) validator in debug nor silently wrap in
+        // release — either would let a hostile engine evade the over-qty check
+        // or kill the correctness gate entirely.
+        let add = f.qty.max(0);
+        let b = buy_filled.entry(f.buy_order_id.clone()).or_insert(0);
+        *b = b.saturating_add(add);
+        let s = sell_filled.entry(f.sell_order_id.clone()).or_insert(0);
+        *s = s.saturating_add(add);
+    }
+    if let Some((id, qty)) = bad_qty {
+        out.push(Violation {
+            reason: "INVALID_FILL_QTY",
+            detail: json!({ "client_order_id": id, "qty": qty }),
+        });
     }
     if let Some(id) = unknown_id {
         out.push(Violation {
@@ -116,29 +163,13 @@ pub fn detect(
         });
     }
 
-    // CANCEL_RACE: a fill landing for an id whose cancel was emitted in the
-    // events stream. We don't have ack timestamps here, but we have the
-    // events file ordering: if a cancel exists for an id, ANY subsequent
-    // fill for that id is racy. Reported once.
-    let mut cancel_race_id: Option<String> = None;
-    let cancelled_ids: HashSet<&String> = cancelled_after_line.keys().collect();
-    for entry in deduped_actual {
-        let f = &entry.fill;
-        if cancelled_ids.contains(&f.buy_order_id) || cancelled_ids.contains(&f.sell_order_id) {
-            cancel_race_id = Some(if cancelled_ids.contains(&f.buy_order_id) {
-                f.buy_order_id.clone()
-            } else {
-                f.sell_order_id.clone()
-            });
-            break;
-        }
-    }
-    if let Some(id) = cancel_race_id {
-        out.push(Violation {
-            reason: "CANCEL_RACE",
-            detail: json!({ "client_order_id": id }),
-        });
-    }
+    // NOTE: we deliberately do NOT flag a "cancel race" — a cancel that arrives
+    // after its order already traded legitimately returns not_found, and the
+    // fill stands. The authoritative check is the diff: the reference replays
+    // cancels in the engine's true arrival order (by ack engine_seq), so if the
+    // engine ever filled a genuinely-cancelled order the diff surfaces it as an
+    // UNEXPECTED_FILL / PRICE_TIME_PRIORITY_VIOLATION. A heuristic that flags
+    // any fill for a once-cancelled id only produces false positives here.
 
     out
 }
@@ -201,5 +232,38 @@ mod tests {
         let actual = vec![fill("a", "b", 1, Some(2)), fill("a", "b", 1, Some(1))];
         let v = detect(&events, &actual, &actual);
         assert!(v.iter().any(|x| x.reason == "OUT_OF_ORDER_SEQ"));
+    }
+
+    #[test]
+    fn flags_non_positive_fill_qty() {
+        let events = vec![order("a", 5), order("b", 5)];
+        let actual = vec![fill("a", "b", 0, Some(1))];
+        let v = detect(&events, &actual, &actual);
+        assert!(v.iter().any(|x| x.reason == "INVALID_FILL_QTY"));
+    }
+
+    #[test]
+    fn negative_qty_cannot_mask_overfill() {
+        // Over-fill "a" by 4, then try to "subtract" it back with a -4 fill so
+        // the cumulative lands on the placed qty. The negative qty is flagged
+        // and clamped, so the over-fill still surfaces.
+        let events = vec![order("a", 5), order("b", 5)];
+        let actual = vec![fill("a", "b", 9, Some(1)), fill("a", "b", -4, Some(2))];
+        let v = detect(&events, &actual, &actual);
+        assert!(v.iter().any(|x| x.reason == "INVALID_FILL_QTY"));
+        assert!(v.iter().any(|x| x.reason == "PARTIAL_FILL_OVER_QTY"));
+    }
+
+    #[test]
+    fn huge_qty_does_not_panic_or_wrap() {
+        let events = vec![order("a", 5), order("b", 5)];
+        let actual = vec![
+            fill("a", "b", i64::MAX, Some(1)),
+            fill("a", "b", 2, Some(2)),
+        ];
+        // Pre-fix this overflowed: debug panicked (killing the single-threaded
+        // validator → no validation.json), release wrapped silently.
+        let v = detect(&events, &actual, &actual);
+        assert!(v.iter().any(|x| x.reason == "PARTIAL_FILL_OVER_QTY"));
     }
 }
