@@ -1,12 +1,18 @@
 package main
 
 import (
+	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
 
 	"score-engine/internal/scoring"
 )
@@ -16,6 +22,9 @@ type Handler struct {
 }
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
 	repoRoot, err := resolveRepoRoot()
 	if err != nil {
 		log.Fatal(err)
@@ -27,14 +36,31 @@ func main() {
 	}
 
 	handler := &Handler{runRoot: filepath.Join(repoRoot, ".runs")}
+	authToken := firstEnv("SCORE_ENGINE_AUTH_TOKEN", "SERVICE_AUTH_TOKEN")
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handler.Health)
-	mux.HandleFunc("POST /score", handler.Score)
-	mux.HandleFunc("POST /runs/{run_id}/score", handler.ScoreRun)
+	mux.HandleFunc("POST /score", requireServiceAuth(handler.Score, authToken))
+	mux.HandleFunc("POST /runs/{run_id}/score", requireServiceAuth(handler.ScoreRun, authToken))
 	mux.HandleFunc("GET /runs/{run_id}/score", handler.GetRunScore)
 
-	log.Printf("score engine listening on %s run_root=%s", addr, handler.runRoot)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		log.Printf("score engine listening on %s run_root=%s", addr, handler.runRoot)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("listen: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	stop()
+	log.Printf("shutdown signal received; draining in-flight scoring requests")
+	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutCtx); err != nil {
+		log.Printf("shutdown: %v", err)
+	} else {
+		log.Printf("score engine drained cleanly")
+	}
 }
 
 func (h *Handler) Health(w http.ResponseWriter, _ *http.Request) {
@@ -185,4 +211,29 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func requireServiceAuth(next http.HandlerFunc, token string) http.HandlerFunc {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return next
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		got := strings.TrimSpace(r.Header.Get("Authorization"))
+		want := "Bearer " + token
+		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		next(w, r)
+	}
+}
+
+func firstEnv(names ...string) string {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+	}
+	return ""
 }

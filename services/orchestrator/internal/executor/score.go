@@ -19,15 +19,23 @@ func Score(run *model.BenchmarkRun, metrics *model.Metrics, validation *model.Va
 		result.CorrectnessGate = "failed"
 		if validation != nil {
 			result.RunID = validation.RunID
+			result.FailureReason = validation.Reason
+		}
+		if result.FailureReason == "" {
+			result.FailureReason = "validation failed"
 		}
 		return writeScore(run, result)
 	}
 	if metrics == nil {
-		result.Score = 100
-		result.LatencyScore = 100
-		result.ThroughputScore = 100
-		result.StabilityScore = 100
-		result.ResourceScore = 100
+		result.Valid = false
+		result.CorrectnessGate = "failed"
+		result.FailureReason = "metrics missing"
+		return writeScore(run, result)
+	}
+	if metrics.OrdersSent <= 0 {
+		result.Valid = false
+		result.CorrectnessGate = "failed"
+		result.FailureReason = "no benchmark orders produced"
 		return writeScore(run, result)
 	}
 

@@ -74,6 +74,7 @@ func main() {
 	handler := api.NewHandler(runner, st)
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux, handler)
+	httpHandler := api.RequireServiceAuth(mux, firstEnv("ORCHESTRATOR_AUTH_TOKEN", "SERVICE_AUTH_TOKEN"))
 
 	addr := os.Getenv("ORCHESTRATOR_ADDR")
 	if addr == "" {
@@ -82,7 +83,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           httpHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
@@ -165,4 +166,13 @@ func envPath(name string, fallback string) string {
 		return value
 	}
 	return abs
+}
+
+func firstEnv(names ...string) string {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+	}
+	return ""
 }

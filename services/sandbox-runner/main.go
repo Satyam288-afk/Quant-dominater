@@ -35,7 +35,12 @@ func main() {
 	case "local":
 		runner = sandbox.NewLocalRunner(repoRoot, runRoot)
 	case "docker":
-		runner = sandbox.NewDockerRunner(repoRoot, runRoot)
+		dockerRunner, err := sandbox.NewDockerRunner(repoRoot, runRoot)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer dockerRunner.Close()
+		runner = dockerRunner
 	default:
 		log.Fatalf("unsupported SANDBOX_RUNNER_MODE %q", mode)
 	}
@@ -44,13 +49,14 @@ func main() {
 
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux, handler)
+	httpHandler := api.RequireServiceAuth(mux, firstEnv("SANDBOX_RUNNER_AUTH_TOKEN", "SERVICE_AUTH_TOKEN"))
 
 	addr := os.Getenv("SANDBOX_RUNNER_ADDR")
 	if addr == "" {
 		addr = ":9200"
 	}
 
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{Addr: addr, Handler: httpHandler, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		log.Printf("sandbox runner listening on %s repo_root=%s mode=%s", addr, repoRoot, mode)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -97,4 +103,13 @@ func resolveRepoRoot() (string, error) {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func firstEnv(names ...string) string {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+	}
+	return ""
 }

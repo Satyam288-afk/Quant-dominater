@@ -1,6 +1,9 @@
 package sandbox
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type BuildRequest struct {
 	SubmissionID string `json:"submission_id"`
@@ -47,9 +50,9 @@ type SandboxHandle struct {
 }
 
 type Runner interface {
-	Build(req BuildRequest) (ImageRef, error)
-	Start(req StartRequest) (SandboxHandle, error)
-	Stop(sandboxID string) error
+	Build(ctx context.Context, req BuildRequest) (ImageRef, error)
+	Start(ctx context.Context, req StartRequest) (SandboxHandle, error)
+	Stop(ctx context.Context, sandboxID string) error
 	Get(sandboxID string) (SandboxHandle, bool)
 	List() []SandboxHandle
 }

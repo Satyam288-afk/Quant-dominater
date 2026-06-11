@@ -257,7 +257,10 @@ mod tests {
     #[test]
     fn huge_qty_does_not_panic_or_wrap() {
         let events = vec![order("a", 5), order("b", 5)];
-        let actual = vec![fill("a", "b", i64::MAX, Some(1)), fill("a", "b", 2, Some(2))];
+        let actual = vec![
+            fill("a", "b", i64::MAX, Some(1)),
+            fill("a", "b", 2, Some(2)),
+        ];
         // Pre-fix this overflowed: debug panicked (killing the single-threaded
         // validator → no validation.json), release wrapped silently.
         let v = detect(&events, &actual, &actual);

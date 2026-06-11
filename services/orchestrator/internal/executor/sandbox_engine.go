@@ -18,6 +18,7 @@ import (
 type SandboxEngine struct {
 	baseURL string
 	client  *http.Client
+	token   string
 
 	mu        sync.Mutex
 	imageRefs map[string]string
@@ -61,6 +62,7 @@ func NewSandboxEngine(baseURL string) *SandboxEngine {
 	return &SandboxEngine{
 		baseURL:   strings.TrimRight(baseURL, "/"),
 		client:    &http.Client{Timeout: 30 * time.Second},
+		token:     firstEnv("SANDBOX_RUNNER_AUTH_TOKEN", "SERVICE_AUTH_TOKEN"),
 		imageRefs: make(map[string]string),
 	}
 }
@@ -147,6 +149,9 @@ func (e *SandboxEngine) postJSON(ctx context.Context, path string, req any, resp
 		return err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if e.token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+e.token)
+	}
 
 	httpResp, err := e.client.Do(httpReq)
 	if err != nil {
@@ -167,4 +172,13 @@ func (e *SandboxEngine) postJSON(ctx context.Context, path string, req any, resp
 		return nil
 	}
 	return json.NewDecoder(httpResp.Body).Decode(resp)
+}
+
+func firstEnv(names ...string) string {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+	}
+	return ""
 }

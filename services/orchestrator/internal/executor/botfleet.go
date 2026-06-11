@@ -91,7 +91,23 @@ func (b *BotFleet) Run(ctx context.Context, run *model.BenchmarkRun, endpoint st
 	if err := writeSplitArtifacts(eventsOut, outputsOut, run.ArtifactDir); err != nil {
 		return nil, err
 	}
+	if err := validateBenchmarkLoad(metrics); err != nil {
+		return metrics, err
+	}
 	return metrics, nil
+}
+
+func validateBenchmarkLoad(metrics *model.Metrics) error {
+	if metrics == nil {
+		return fmt.Errorf("bot fleet produced no metrics")
+	}
+	if metrics.OrdersSent <= 0 {
+		if metrics.ConnectErrors > 0 {
+			return fmt.Errorf("bot fleet produced no orders; connect_errors=%d", metrics.ConnectErrors)
+		}
+		return fmt.Errorf("bot fleet produced no orders")
+	}
+	return nil
 }
 
 func writeSplitArtifacts(eventsPath, outputsPath, artifactDir string) error {

@@ -7,13 +7,14 @@ use std::process;
 use anyhow::{Context, Result};
 use clap::Parser;
 use reference_orderbook::Fill;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 mod compare;
 mod edge_cases;
 mod replay;
 
 use edge_cases::ActualFill;
+use replay::EventKind;
 
 #[derive(Debug, Parser)]
 #[command(about = "Replay benchmark inputs through the reference orderbook and compare fills")]
@@ -33,6 +34,19 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
     let (run_id, events) = replay::read_events(&args.events)?;
+    if !events
+        .iter()
+        .any(|event| matches!(event.kind, EventKind::NewOrder(_)))
+    {
+        let result = json!({
+            "run_id": run_id,
+            "valid": false,
+            "reason": "NO_BENCHMARK_EVENTS",
+            "fills_checked": 0,
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        process::exit(1);
+    }
     // Reconstruct the engine's authoritative arrival order from the ack
     // engine_seq, then replay in that order. Under concurrent multi-bot load the
     // events.jsonl line order is the bots' *send* order, not the order the

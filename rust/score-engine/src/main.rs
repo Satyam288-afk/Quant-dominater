@@ -104,11 +104,11 @@ async fn main() -> Result<()> {
     let validation: Value =
         serde_json::from_slice(&validation_bytes).context("decoding validation.json")?;
 
-    let valid = validation
+    let mut valid = validation
         .get("valid")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let failure_reason = validation
+    let mut failure_reason = validation
         .get("reason")
         .and_then(Value::as_str)
         .map(|s| s.to_string());
@@ -170,6 +170,10 @@ async fn main() -> Result<()> {
     };
 
     let run_id = resolved_run_id.unwrap_or_else(|| "unknown".to_string());
+    if valid && metrics.orders_sent <= 0 {
+        valid = false;
+        failure_reason = Some("no benchmark orders produced".to_string());
+    }
 
     let composite: CompositeScore = compose(ScoreInputs {
         valid,

@@ -33,13 +33,14 @@ func main() {
 
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux, handler)
+	httpHandler := api.RequireAuth(mux, firstEnv("SUBMISSION_API_AUTH_TOKEN", "SERVICE_AUTH_TOKEN"))
 
 	addr := os.Getenv("SUBMISSION_API_ADDR")
 	if addr == "" {
 		addr = ":9100"
 	}
 
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{Addr: addr, Handler: httpHandler, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		log.Printf("submission API listening on %s repo_root=%s artifact_root=%s", addr, repoRoot, artifactRoot)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -49,7 +50,7 @@ func main() {
 
 	<-ctx.Done()
 	stop()
-	log.Printf("shutdown signal received; draining in-flight requests")
+	log.Printf("shutdown signal received; draining in-flight submission requests")
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutCtx); err != nil {
@@ -99,4 +100,13 @@ func envPath(name string, fallback string) string {
 		return value
 	}
 	return abs
+}
+
+func firstEnv(names ...string) string {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+	}
+	return ""
 }

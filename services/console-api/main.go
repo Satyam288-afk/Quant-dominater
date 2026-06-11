@@ -18,12 +18,15 @@ import (
 const maxSubmissionBytes = 128 << 20
 
 type Config struct {
-	Addr            string
-	RepoRoot        string
-	UIRoot          string
-	SubmissionURL   string
-	OrchestratorURL string
-	LeaderboardURL  string
+	Addr              string
+	RepoRoot          string
+	UIRoot            string
+	SubmissionURL     string
+	OrchestratorURL   string
+	LeaderboardURL    string
+	SubmissionToken   string
+	OrchestratorToken string
+	LeaderboardToken  string
 }
 
 type Handler struct {
@@ -100,12 +103,15 @@ func loadConfig() (Config, error) {
 	}
 	uiRoot := envPath("CONSOLE_UI_DIR", filepath.Join(repoRoot, "web", "console-ui"))
 	return Config{
-		Addr:            envString("CONSOLE_API_ADDR", ":9700"),
-		RepoRoot:        repoRoot,
-		UIRoot:          uiRoot,
-		SubmissionURL:   strings.TrimRight(envString("SUBMISSION_API_URL", "http://127.0.0.1:9100"), "/"),
-		OrchestratorURL: strings.TrimRight(envString("ORCHESTRATOR_URL", "http://127.0.0.1:9300"), "/"),
-		LeaderboardURL:  strings.TrimRight(envString("LEADERBOARD_URL", "http://127.0.0.1:9500"), "/"),
+		Addr:              envString("CONSOLE_API_ADDR", ":9700"),
+		RepoRoot:          repoRoot,
+		UIRoot:            uiRoot,
+		SubmissionURL:     strings.TrimRight(envString("SUBMISSION_API_URL", "http://127.0.0.1:9100"), "/"),
+		OrchestratorURL:   strings.TrimRight(envString("ORCHESTRATOR_URL", "http://127.0.0.1:9300"), "/"),
+		LeaderboardURL:    strings.TrimRight(envString("LEADERBOARD_URL", "http://127.0.0.1:9500"), "/"),
+		SubmissionToken:   firstEnv("SUBMISSION_API_AUTH_TOKEN", "SERVICE_AUTH_TOKEN"),
+		OrchestratorToken: firstEnv("ORCHESTRATOR_AUTH_TOKEN", "SERVICE_AUTH_TOKEN"),
+		LeaderboardToken:  firstEnv("LEADERBOARD_AUTH_TOKEN", "SERVICE_AUTH_TOKEN"),
 	}, nil
 }
 
@@ -159,6 +165,7 @@ func (h *Handler) createSubmission(w http.ResponseWriter, r *http.Request) {
 	if r.ContentLength > 0 {
 		req.ContentLength = r.ContentLength
 	}
+	setBearerAuth(req, h.cfg.SubmissionToken)
 	h.proxy(w, req)
 }
 
@@ -182,6 +189,7 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	createReq.Header.Set("Content-Type", "application/json")
+	setBearerAuth(createReq, h.cfg.SubmissionToken)
 
 	var run BenchmarkRun
 	if err := h.doJSON(createReq, http.StatusCreated, &run); err != nil {
@@ -198,6 +206,7 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	setBearerAuth(startReq, h.cfg.OrchestratorToken)
 	var started BenchmarkRun
 	if err := h.doJSON(startReq, http.StatusAccepted, &started); err != nil {
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("run created but orchestrator start failed: %s", err))
@@ -215,6 +224,7 @@ func (h *Handler) listRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	setBearerAuth(req, h.cfg.OrchestratorToken)
 	h.proxy(w, req)
 }
 
@@ -225,6 +235,7 @@ func (h *Handler) getRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	setBearerAuth(req, h.cfg.OrchestratorToken)
 	h.proxy(w, req)
 }
 
@@ -234,6 +245,7 @@ func (h *Handler) leaderboard(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	setBearerAuth(req, h.cfg.LeaderboardToken)
 	h.proxy(w, req)
 }
 
@@ -310,6 +322,7 @@ func (h *Handler) fetchRun(ctx context.Context, runID string) (*BenchmarkRun, er
 	if err != nil {
 		return nil, err
 	}
+	setBearerAuth(req, h.cfg.OrchestratorToken)
 	var run BenchmarkRun
 	if err := h.doJSON(req, http.StatusOK, &run); err != nil {
 		return nil, err
@@ -428,4 +441,20 @@ func envPath(name string, fallback string) string {
 		return value
 	}
 	return abs
+}
+
+func firstEnv(names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func setBearerAuth(req *http.Request, token string) {
+	if token == "" {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 }

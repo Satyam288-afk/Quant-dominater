@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -117,7 +119,7 @@ func main() {
 	mux.HandleFunc("GET /health", handler.Health)
 	mux.HandleFunc("GET /ready", handler.Ready)
 	mux.HandleFunc("GET /leaderboard", handler.List)
-	mux.HandleFunc("POST /leaderboard/runs", handler.Upsert)
+	mux.HandleFunc("POST /leaderboard/runs", requireServiceAuth(handler.Upsert, firstEnv("LEADERBOARD_AUTH_TOKEN", "SERVICE_AUTH_TOKEN")))
 	mux.HandleFunc("GET /runs/{id}/live", handler.LiveRun)
 	mux.HandleFunc("GET /runs/{id}/timeseries", handler.RunTimeseries)
 	mux.HandleFunc("GET /ws", handler.WS)
@@ -322,4 +324,29 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func requireServiceAuth(next http.HandlerFunc, token string) http.HandlerFunc {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return next
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		got := strings.TrimSpace(r.Header.Get("Authorization"))
+		want := "Bearer " + token
+		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		next(w, r)
+	}
+}
+
+func firstEnv(names ...string) string {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+	}
+	return ""
 }

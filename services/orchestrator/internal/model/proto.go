@@ -65,7 +65,7 @@ func (s ScoreResult) ToProto() *benchmarkv1.ScoreResult {
 		RunId:         s.RunID,
 		Valid:         s.Valid,
 		FinalScore:    s.Score,
-		FailureReason: s.CorrectnessGate,
+		FailureReason: s.FailureReason,
 	}
 }
 
