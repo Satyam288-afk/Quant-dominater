@@ -1,9 +1,10 @@
 # Architecture Blueprint — IICPC Distributed Benchmarking Platform
 
-This is the comprehensive system-design document for the platform: the
-microservices, the protocols between them, the data stores, the isolation
-strategy, and how the whole thing scales horizontally. It is the contract the
-code in this repo implements.
+This is the system-design document for the platform: the microservices, the
+protocols between them, the data stores, the isolation strategy, and the target
+horizontal scaling model. It separates the verified local/Docker implementation
+from the production Kubernetes direction; current production gaps are tracked in
+[PRODUCTION_GAP_ANALYSIS.md](PRODUCTION_GAP_ANALYSIS.md).
 
 > Companion docs: [ARCHITECTURE.md](ARCHITECTURE.md) (rationale & lifecycle),
 > [API_CONTRACT.md](API_CONTRACT.md) (wire messages), [SCORING.md](SCORING.md)
@@ -52,7 +53,7 @@ bots, measures latency / throughput / correctness, and streams a live ranking.
 |---|---|---|---|
 | `submission-api` | Go | 9100 | accept uploads, store artifact, queue run |
 | `orchestrator` | Go | 9300 | drive the benchmark lifecycle FSM |
-| `sandbox-runner` | Go | 9200 | build image, run hardened sandbox (Docker / K8s) |
+| `sandbox-runner` | Go | 9200 | build image, run hardened sandbox (local/Docker now; Kubernetes runner is target work) |
 | `bot-fleet` | Rust | — | distributed load generator (Tokio), telemetry producer |
 | `telemetry-ingester` | Rust | — | Kafka consumer → percentiles → Timescale + Redis |
 | `score-engine` | Rust/Go | 9400 | composite score, gated by correctness |
@@ -105,20 +106,21 @@ failure: BUILD_FAILED · HEALTHCHECK_FAILED · SANDBOX_CRASHED · BOT_FLEET_FAIL
          · TIMEOUT · VALIDATION_FAILED · INFRA_FAILED
 ```
 
-Per run the orchestrator: builds the image, applies a sandbox Pod + Service into
-`iicpc-sandbox`, health-checks `/health`, launches the bot-fleet Job pointed at
-the engine, then validates and scores.
+Per run today the orchestrator builds the submission through the sandbox-runner,
+starts the local/Docker sandbox, health-checks `/health`, runs the Rust bot
+fleet locally, then validates and scores. The target Kubernetes implementation
+will replace those local process launches with per-run sandbox Pod/Service and
+bot-fleet Job creation.
 
 ## 6. Isolation strategy
 
-The sandbox boundary is identical in Docker and Kubernetes mode (see
-[SECURITY_SANDBOX.md](SECURITY_SANDBOX.md)): all capabilities dropped, no
-privilege escalation, read-only rootfs + locked tmpfs, memory cap with swap
-disabled, **CPU pinning** for fair latency, pids/nofile limits, optional
-gVisor runtime. Network is default-deny: a contestant pod is reachable **only**
-by the bot fleet on `:8080` and has **no** egress (internet or cross-contestant),
-enforced by `NetworkPolicy` in K8s and DNS black-holing + scoped networks in
-Docker. RBAC scopes the runner to manage pods only in `iicpc-sandbox`.
+Docker mode enforces the sandbox controls described in
+[SECURITY_SANDBOX.md](SECURITY_SANDBOX.md): capabilities dropped, no privilege
+escalation, read-only rootfs + locked tmpfs, memory cap with swap disabled,
+CPU quotas/pinning where the host supports it, pids/nofile limits, optional
+gVisor runtime, and isolated networks when egress is disabled. Kubernetes
+manifests mirror the intended PodSecurity/NetworkPolicy/RBAC boundary, but the
+Kubernetes runner that creates per-run sandbox pods is still target work.
 
 ## 7. Scoring
 
@@ -140,16 +142,18 @@ broken one fails).
 
 ## 8. How it scales horizontally
 
-- **Load** — bot-fleet is an Indexed K8s Job: `parallelism × BOTS_PER_POD` bots
-  across nodes (default 8 × 1250 = 10,000). The Rust fleet also multiplexes many
-  virtual bots over a connection pool, so per-pod density is high.
+- **Load** — the Rust fleet multiplexes many virtual bots over a connection
+  pool. The Kubernetes Indexed Job manifest shows the target distributed shape:
+  `parallelism × BOTS_PER_POD` bots across nodes (default 8 × 1250 = 10,000).
 - **Ingestion** — telemetry-ingester is a Kafka consumer group; its HPA scales
   replicas to the partition count. Throughput grows with partitions + replicas.
 - **Live API** — leaderboard-api is stateless (reads Redis); HPA 2→10 on CPU.
-- **Sandboxes** — a dedicated, tainted, compute-optimized node group; the
-  cluster autoscaler adds nodes as concurrent runs increase.
-- **Substrate** — `infra/terraform` provisions the VPC + EKS + node groups + ECR;
-  `infra/k8s` deploys the whole cell with one `kubectl apply -k`.
+- **Sandboxes** — target production shape uses a dedicated, tainted,
+  compute-optimized node group; the cluster autoscaler adds nodes as concurrent
+  runs increase.
+- **Substrate** — `infra/terraform` provisions VPC + EKS + node groups + ECR;
+  the active `infra/k8s` base deploys the shared data plane and live leaderboard
+  read path. Upload-driven cloud sandbox orchestration remains future work.
 
 ## 9. Tech choices (why)
 

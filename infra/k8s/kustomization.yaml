@@ -1,9 +1,11 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# `kubectl apply -k infra/k8s` brings up a full benchmark cell. Per-run
-# templates (40-sandbox-pod-template, 31-bot-fleet-job) are intentionally NOT
-# listed here — the orchestrator instantiates those per benchmark run.
+# `kubectl apply -k infra/k8s` brings up the validated shared data plane and
+# live leaderboard read path. Upload-driven sandbox orchestration is not enabled
+# in this base because the Go sandbox-runner currently implements local/docker
+# runners only. The per-run sandbox/bot-fleet manifests stay as templates until
+# a real Kubernetes runner + object-store artifact path is implemented.
 resources:
   - 00-namespaces.yaml
   - 01-config.yaml
@@ -11,9 +13,6 @@ resources:
   - 10-redpanda.yaml
   - 11-timescaledb.yaml
   - 12-redis.yaml
-  - 20-submission-api.yaml
-  - 21-sandbox-runner.yaml
-  - 22-orchestrator.yaml
   - 23-leaderboard-api.yaml
   - 30-telemetry-ingester.yaml
   - 41-network-policies.yaml

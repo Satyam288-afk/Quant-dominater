@@ -74,7 +74,12 @@ chaos-demo:
 # IaC validation (no cloud creds / cluster required)
 k8s-validate:
 	kubectl kustomize infra/k8s | kubeconform -strict -summary -kubernetes-version 1.30.0
-	kubeconform -strict -summary -kubernetes-version 1.30.0 infra/k8s/40-sandbox-pod-template.yaml infra/k8s/31-bot-fleet-job.yaml
+	kubeconform -strict -summary -kubernetes-version 1.30.0 \
+		infra/k8s/20-submission-api.yaml \
+		infra/k8s/21-sandbox-runner.yaml \
+		infra/k8s/22-orchestrator.yaml \
+		infra/k8s/31-bot-fleet-job.yaml \
+		infra/k8s/40-sandbox-pod-template.yaml
 
 tf-validate:
 	cd infra/terraform && (command -v tofu >/dev/null && tofu fmt -check -recursive && tofu init -backend=false -input=false >/dev/null && tofu validate) || \

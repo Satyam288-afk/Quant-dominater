@@ -1,66 +1,71 @@
-# Kubernetes — Benchmark Cell
+# Kubernetes IaC
 
-A self-contained "benchmark cell": one `kubectl apply -k .` brings up the data
-plane, control plane, load generator, and the network-fenced sandbox namespace.
+The base kustomization deploys the shared cloud data plane and live leaderboard
+read path:
+
+- Redpanda telemetry bus
+- TimescaleDB metrics store
+- Redis live leaderboard store
+- leaderboard-api
+- telemetry-ingester
+- sandbox namespace and network-policy boundary
+
+It intentionally does **not** deploy upload-driven sandbox orchestration. The
+current Go sandbox-runner implements local and Docker runners only; a production
+Kubernetes runner still needs durable artifact storage plus image build/push and
+Pod/Service lifecycle code. The disabled control-plane manifests remain in this
+directory as templates, not as a claimed working runtime.
+
+## Render
 
 ```bash
-kubectl apply -k infra/k8s
-# or render/inspect first:
-kubectl kustomize infra/k8s | less
+kubectl kustomize infra/k8s
 ```
 
-Validate without a cluster:
+## Strict Validation
 
 ```bash
 kubectl kustomize infra/k8s | kubeconform -strict -summary -kubernetes-version 1.30.0
+kubeconform -strict -summary -kubernetes-version 1.30.0 \
+  infra/k8s/20-submission-api.yaml \
+  infra/k8s/21-sandbox-runner.yaml \
+  infra/k8s/22-orchestrator.yaml \
+  infra/k8s/31-bot-fleet-job.yaml \
+  infra/k8s/40-sandbox-pod-template.yaml
 ```
 
-## Layout
+## Active Base Resources
 
 | File | Resources | Role |
 |---|---|---|
-| `00-namespaces.yaml` | `iicpc`, `iicpc-sandbox` | trust boundary; sandbox ns is PSS `restricted` |
-| `01-config.yaml` | ConfigMap + Secret | service discovery + DB creds |
-| `02-rbac.yaml` | SA + Role + RoleBinding | sandbox-runner may manage pods **only** in `iicpc-sandbox` |
-| `10-redpanda.yaml` | StatefulSet + Svc + init Job | telemetry bus (Kafka API), 4-partition topic |
-| `11-timescaledb.yaml` | StatefulSet + Svc | durable metrics + scores (schema via ConfigMap) |
+| `00-namespaces.yaml` | `iicpc`, `iicpc-sandbox` | trust boundary; sandbox namespace is PSS `restricted` |
+| `01-config.yaml` | ConfigMap + Secret | service discovery + demo DB credentials |
+| `02-rbac.yaml` | SA + Role + RoleBinding | scoped RBAC for future sandbox orchestration |
+| `10-redpanda.yaml` | StatefulSet + Svc + init Job | telemetry bus, Kafka API, 4-partition topic |
+| `11-timescaledb.yaml` | StatefulSet + Svc | metrics and score storage for the live data path |
 | `12-redis.yaml` | Deployment + Svc | live leaderboard state |
-| `20..22` | Deployments + Svcs | submission-api, sandbox-runner, orchestrator |
-| `23-leaderboard-api.yaml` | Deployment + Svc + **LB** + **HPA** | live WS API, externally exposed |
-| `30-telemetry-ingester.yaml` | Deployment + **HPA** | Kafka consumer group, scales to partition count |
-| `31-bot-fleet-job.yaml` | Job (template) | distributed load generator (per-run) |
-| `40-sandbox-pod-template.yaml` | Pod + Svc (template) | contestant engine, full `securityContext` |
-| `41-network-policies.yaml` | NetworkPolicy ×2 | default-deny + bot-fleet→engine only |
+| `23-leaderboard-api.yaml` | Deployment + Svc + LoadBalancer + HPA | externally exposed live API |
+| `30-telemetry-ingester.yaml` | Deployment + HPA | Kafka consumer group, scales to partition count |
+| `41-network-policies.yaml` | NetworkPolicy | default-deny sandbox namespace and bot-fleet ingress template |
 
-## How it scales horizontally
+## Disabled Templates
 
-- **Load generator** — `31-bot-fleet-job.yaml` is an Indexed Job:
-  `parallelism × BOTS_PER_POD` bots across nodes (default 8 × 1250 = **10,000**).
-  Raise `parallelism` and node count for more.
-- **Ingestion** — `telemetry-ingester` is a Kafka consumer group; its HPA scales
-  replicas up to the topic partition count (4). More partitions → more throughput.
-- **Live API** — `leaderboard-api` is stateless (reads Redis); HPA 2→10 on CPU.
+| File | Why disabled |
+|---|---|
+| `20-submission-api.yaml` | Uses pod-local artifact storage; production needs S3/MinIO and a DB-backed control-plane store. |
+| `21-sandbox-runner.yaml` | The binary does not implement `kubernetes` mode yet; scaling this above zero would not provide a cloud sandbox runtime. |
+| `22-orchestrator.yaml` | Current executor runs local bot-fleet/validator binaries; production needs a Kubernetes bot-fleet executor. |
+| `31-bot-fleet-job.yaml` | Per-run template; should be created by the future Kubernetes executor. |
+| `40-sandbox-pod-template.yaml` | Per-run contestant sandbox template; should be created by the future Kubernetes runner. |
 
-## Per-run lifecycle (orchestrator-driven)
+## Production Hardening Needed
 
-The orchestrator does not pre-create contestant pods. Per benchmark run it:
-
-1. asks `sandbox-runner` to build + apply a `40-sandbox-pod-template` instance
-   (`RUN_ID`/`REGISTRY` substituted) into `iicpc-sandbox`;
-2. waits for `/health`, then applies a `31-bot-fleet-job` instance pointed at the
-   engine Service;
-3. the fleet streams telemetry → Redpanda → ingester → Timescale/Redis;
-4. `score-engine` writes the scorecard; `leaderboard-api` streams it live.
-
-`41-network-policies.yaml` guarantees a contestant pod can be reached **only** by
-the bot fleet on `:8080` and has **no** egress (internet or cross-contestant).
-
-## Production notes
-
-- Data stores shown as single instances are dev-grade. In production use the
-  Redpanda Operator, a managed Postgres/Timescale, and a Redis with replicas
-  (or managed ElastiCache) — provisioned by `infra/terraform`.
-- CPU pinning for sandboxes requires the kubelet `static` CPU manager policy on
-  the sandbox node group (configured in Terraform) + Guaranteed QoS (already set).
-- Retag images centrally via `kustomize edit set image` after Terraform creates
-  the registry.
+- Use managed Redpanda/MSK, managed Postgres/Timescale, and managed Redis or
+  operator-managed clusters for production.
+- Add S3/MinIO artifact storage and a Postgres/Timescale control-plane store.
+- Implement Kubernetes runner code that builds/pushes contestant images and
+  creates per-run Pod/Service resources through Kubernetes APIs.
+- Configure sandbox node groups with kubelet static CPU manager policy before
+  claiming exclusive CPU pinning.
+- Retag service images centrally via `kustomize edit set image` after Terraform
+  creates the registry.

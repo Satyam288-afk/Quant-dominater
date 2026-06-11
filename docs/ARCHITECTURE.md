@@ -2,7 +2,7 @@
 
 The platform is a deterministic benchmark system for contestant trading engines. The final production shape has a control plane for submissions, sandboxing, orchestration, scoring, and leaderboard updates, plus a data plane for high-frequency order traffic and validation.
 
-This repo starts with a local vertical slice:
+The verified local vertical slice is:
 
 ```text
 Rust Bot Fleet -> Contestant Engine Stub
@@ -27,7 +27,7 @@ Rust Bot Fleet -> Contestant Engine Stub
 | Correctness gate | A fast incorrect engine gets score `0` |
 | Infra later | Terraform/Kubernetes only matter after the benchmark core works |
 
-## Final Production Direction
+## Target Production Direction
 
 ```text
 Submission API -> Sandbox Runner -> Contest Orchestrator
@@ -81,14 +81,22 @@ INFRA_FAILED
 | `contestant_outputs.jsonl` | bot fleet | acks/fills received from engine |
 | `engine-events.jsonl` | stub engine | engine-side input/output audit log |
 
-## Next Layers
+## Current State And Next Layers
 
-After the local path works:
+Already implemented:
 
-1. Add Redpanda topics for telemetry.
-2. Add leaderboard API and Redis live state.
-3. Add submission API and Docker build path.
-4. Add sandbox hardening with gVisor/cgroups/network policy.
-5. Add orchestrator state machine.
-6. Add Kubernetes and Terraform.
+1. Local upload-to-score pipeline.
+2. Docker sandbox build/start path with resource controls.
+3. Redpanda/Timescale/Redis local data-plane demo.
+4. Leaderboard API, Redis backend, and React UI.
+5. Submission API and orchestrator state machine.
+6. Kubernetes/Terraform IaC for the shared data plane.
 
+Still required before real production:
+
+1. Durable Postgres/Timescale control-plane store.
+2. S3/MinIO artifact store shared by services.
+3. Kubernetes sandbox runner and Kubernetes bot-fleet executor.
+4. Real auth/RBAC/team isolation/rate limits.
+5. Production observability, CI-gated image builds, and multi-node benchmark
+   evidence.

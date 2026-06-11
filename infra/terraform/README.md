@@ -12,8 +12,11 @@ Provisions the cloud substrate the benchmark platform runs on:
 - **ECR** repositories (one per service) with scan-on-push + a keep-last-20
   lifecycle policy.
 
-It works hand-in-glove with [`infra/k8s`](../k8s): Terraform builds the cluster +
-registry, then `kubectl apply -k infra/k8s` deploys the benchmark cell onto it.
+It works with [`infra/k8s`](../k8s): Terraform builds the cluster + registry,
+then `kubectl apply -k infra/k8s` deploys the shared data plane and live
+leaderboard read path. Upload-driven Kubernetes sandbox orchestration still
+requires the production runner and object-store artifact path described in
+`docs/PRODUCTION_GAP_ANALYSIS.md`.
 
 > Compatible with both Terraform (`terraform`) and OpenTofu (`tofu`).
 
@@ -27,7 +30,7 @@ tofu init            # or: terraform init
 tofu plan
 tofu apply
 
-# point kubectl at the cluster, then deploy the platform
+# point kubectl at the cluster, then deploy the active data-plane base
 $(tofu output -raw configure_kubectl)
 kubectl apply -k ../k8s
 ```

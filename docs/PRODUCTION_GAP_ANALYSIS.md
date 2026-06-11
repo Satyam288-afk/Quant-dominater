@@ -1,111 +1,81 @@
-# Production Gap Analysis
+# Production Readiness Status
 
-This project is an end-to-end local prototype, not a fully production-ready
-multi-tenant cloud platform yet.
+This repository is a strong hackathon-ready prototype with real local and
+Docker-backed execution paths. It is not yet a fully production-ready
+multi-tenant cloud service. The project should be presented as a production-
+oriented benchmark platform prototype, with the gaps below stated explicitly.
 
-## Current Status Against Problem Expectations
+## Verified Working Paths
 
-| Requirement | Current status | Evidence |
+| Area | Status | Evidence |
 |---|---|---|
-| Submission and sandboxing engine | Partial production, working local path | `submission-api`, `sandbox-runner`, local and Docker runner modes |
-| Strict CPU and memory limits | Partial | Docker runner maps `cpu_limit` and `memory_limit` into Docker resources |
-| No internet egress | Partial | Docker mode creates an internal per-sandbox network when `network_egress=false` |
-| gVisor / stronger sandbox escape resistance | Planned | `SANDBOX_DOCKER_RUNTIME=runsc` is supported when host Docker is configured |
-| Distributed load generator | Working local core | Rust Tokio `bot-fleet`, deterministic order stream, WebSocket connection pooling |
-| Thousands of bots / horizontal scale | Partial | Local async fleet exists; Kubernetes sharding is not implemented yet |
-| Limit orders, market orders, cancels | Partial | Limit orders are exercised in the platform demo; market orders and cancel-heavy load need stronger automated coverage |
-| FIX / REST / WebSocket adapters | Partial | WebSocket is primary; REST fallback exists on stub path; FIX is not implemented |
-| Telemetry and validation ingester | Partial | JSONL telemetry, validator, reference orderbook, telemetry ingester; Redpanda/Timescale path is not fully wired into platform demo |
-| Correctness gate | Working | Reference orderbook catches price-time priority violations; invalid engines score zero |
-| Real-time leaderboard and analytics | Working local UI | Go leaderboard API, WebSocket fanout, static benchmark console |
-| Replay/audit links | Partial | Run artifact directory exists; browser artifact download endpoints are not implemented |
-| Docker Compose from scratch | Partial | Compose files exist for backing services; one-command full infra demo still needs hardening |
-| Kubernetes manifests | Minimal placeholder | `infra/k8s` needs real deployments, services, network policies, resource limits |
-| Terraform cloud provisioning | Minimal placeholder | `infra/terraform` needs real modules and environment docs |
+| Upload-to-score pipeline | Working | `scripts/run-platform-demo.sh` uploads an artifact, creates a run, starts the sandbox, runs the bot fleet, validates outputs, scores, publishes leaderboard state, and writes artifacts. |
+| Local sandbox execution | Working | `LocalRunner` builds submitted Go artifacts and starts a health-checked engine process with cleanup. |
+| Docker sandbox execution | Working implementation | `DockerRunner` builds images, applies CPU/memory/PID/readonly-rootfs/no-new-privileges controls, supports isolated internal networks, and reuses one Docker client. |
+| Cancellation and shutdown | Working | Build/start paths accept caller context; long-running Go services drain on SIGTERM/SIGINT. |
+| Bot fleet | Working | Rust Tokio fleet generates pooled WebSocket traffic with limit orders, market-order mix, cancels, deterministic sharding, and telemetry artifacts. |
+| Validation | Working | Reference orderbook catches price-time priority and fill accuracy violations; invalid runs score zero. |
+| Scoring | Working | Composite speed/stability/resource/correctness scoring is shared between Rust and Go tests. |
+| Leaderboard | Working | Go leaderboard API supports file and Redis backends plus WebSocket fanout; React UI builds successfully. |
+| Live local data plane | Working prototype | Docker Compose brings up Redpanda, TimescaleDB, and Redis for the live telemetry path. |
+| IaC renderability | Partially verified | `kubectl kustomize infra/k8s` renders the active base manifests. Strict `kubeconform` and Terraform validation require local tools. |
 
-## What Is Production-Like Now
+## Deliberately Not Claimed
 
-- Deterministic benchmark lifecycle.
-- Real submission -> sandbox -> bot fleet -> validator -> score -> leaderboard path.
-- Reproducible run artifacts under `.runs/{run_id}`.
-- Correctness-first scoring where invalid engines score zero.
-- Empty/no-load benchmark artifacts are rejected. The validator returns
-  `NO_BENCHMARK_EVENTS`, bot-fleet execution fails when no orders are emitted,
-  and scoring demotes otherwise-valid zero-order runs to score zero.
-- Docker sandbox resource controls and local egress isolation.
-- Sandbox build/start/stop paths are context-aware, so cancelled requests and
-  orchestrator timeouts can stop Docker and local runner work instead of leaving
-  long-running builds detached.
-- Local sandbox process lifetime is decoupled from the HTTP `/sandboxes/start`
-  request context after readiness. The platform demo now produces real traffic
-  instead of a false valid run with zero orders.
-- Docker mode uses a runner-owned Docker client instead of creating a new client
-  for every build/start/inspect/cleanup call.
-- Long-running Go services install SIGTERM/SIGINT handlers and drain in-flight
-  HTTP requests; the orchestrator also cancels active runs and waits boundedly
-  for them to persist terminal state.
-- Service mutation endpoints support opt-in bearer-token protection through
-  `SERVICE_AUTH_TOKEN` or service-specific token env vars; orchestrator and
-  console clients forward those tokens.
-- Tests for Rust core and Go services.
+The repository no longer claims a fully working Kubernetes upload-to-sandbox
+runtime. The base Kubernetes kustomization deploys the shared data plane and
+live leaderboard read path only. The upload-driven control-plane manifests are
+kept as disabled templates because the current Go services still need two real
+production pieces before that cloud path is honest:
 
-## What Is Not Production-Level Yet
+1. A durable artifact store, such as S3 or MinIO, shared by submission-api,
+   sandbox-runner, and orchestrator.
+2. A Kubernetes sandbox runner that builds/pushes contestant images and creates
+   per-run Pod/Service resources through the Kubernetes API.
 
-- No real user authentication, team registration, or RBAC. Current token auth is
-  a shared deployment guard, not identity-aware access control.
-- No durable database-backed control plane.
-- No fully wired Redpanda -> TimescaleDB/Redis telemetry path in the main demo.
-- No Kubernetes cell orchestration for horizontal bot scaling.
-- `infra/k8s` is documentation-only in this branch; there is no implemented
-  Kubernetes sandbox runner or deployable manifest set yet.
-- No verified gVisor/rootless BuildKit malicious-code fixture suite.
-- No Terraform cloud deployment.
-- No artifact download API for browser replay/audit links.
-- No production observability stack: traces, structured logs, service metrics, alerting.
-- No CI workflow covering Go, Rust, frontend build, IaC validation, or security
-  scanning.
+This avoids the previous fake-infrastructure problem where
+`SANDBOX_RUNNER_MODE=kubernetes` appeared in manifests even though the binary did
+not implement that mode.
 
-## Review Notes Verified
+## Remaining P0 Before Real Production
 
-The external review's two immediate code-level points were correct for this
-branch and have been implemented:
-
-- Docker builds now receive caller cancellation through the `Runner` interface.
-- Docker mode now reuses a runner-owned Docker client across operations.
-
-The broader claim that these two fixes alone make the project production-ready
-is not correct. They remove important lifecycle and resource-management risks,
-but production readiness still requires durable state, authenticated service
-boundaries, real cloud orchestration, malicious-submission tests, observability,
-and CI/CD.
-
-## Recommended Next Milestones
-
-### P0 Before Production
-
-1. Replace JSON control-plane stores with a durable, transactional
-   Postgres/Timescale-backed store.
+1. Replace JSON control-plane stores with a transactional Postgres/Timescale
+   control-plane store.
 2. Replace local artifact storage with S3/MinIO/object storage, including
-   checksum validation, retention policy, and lifecycle cleanup.
-3. Replace shared-token auth with real authentication, team registration, RBAC,
+   checksum validation, retention, lifecycle cleanup, and per-team prefixes.
+3. Replace shared bearer-token guards with user auth, team registration, RBAC,
    per-team rate limits, audit logs, and scoped service identities.
-4. Harden service-to-service authentication with mTLS or signed workload
-   identity instead of shared bearer tokens.
-5. Add malicious-submission fixtures proving path traversal rejection, egress
-   denial, CPU/memory/PID enforcement, read-only filesystem, and cleanup.
-6. Implement the Kubernetes sandbox runner and deployable manifests, or clearly
-   document Kubernetes as future work only.
+4. Implement service-to-service identity with mTLS, SPIFFE/SPIRE, AWS IAM Roles
+   for Service Accounts, or signed workload tokens.
+5. Implement the Kubernetes sandbox runner and bot-fleet executor, or keep the
+   Kubernetes path documented as data-plane IaC only.
+6. Add malicious-submission integration fixtures that prove egress denial,
+   CPU/memory/PID enforcement, readonly root filesystem, cleanup, and build-time
+   zip-bomb/path-traversal rejection under Docker mode.
+7. Add production observability: structured logs, Prometheus/OpenTelemetry
+   metrics, traces, dashboards, and alerts.
+8. Publish a multi-node benchmark report from a real cluster; the current
+   published benchmark is single-host/local-data-plane evidence.
 
-### P1 Hardening
+## P1 Hardening
 
-1. Make the Redpanda -> TimescaleDB/Redis telemetry path the default production
-   path, with the JSONL path kept as local/dev fallback.
-2. Add CI for Go tests, Rust tests, frontend build, IaC validation, linting, and
-   dependency/security scanning.
-3. Add Prometheus/OpenTelemetry metrics, structured logs, tracing, dashboards,
-   and alerting.
-4. Add managed cloud stores or clearly document in-cluster stores as dev-only.
-5. Add remote Terraform state and environment-specific variables.
-6. Run and publish multi-node benchmark results.
-7. Add a production runbook covering deploy, rollback, cleanup, incident
-   response, and replay/audit workflows.
+1. Make Redpanda -> TimescaleDB/Redis the default production telemetry path,
+   with JSONL kept as the deterministic local fallback.
+2. Add image build/push automation for every service image referenced by
+   Kubernetes manifests.
+3. Add remote Terraform state with locking and environment-specific variables.
+4. Replace in-cluster demo data stores with managed stores or operator-managed
+   clusters.
+5. Add a production runbook for deploy, rollback, cleanup, incident response,
+   replay, and audit workflows.
+
+## Submission Positioning
+
+Accurate wording:
+
+> A production-oriented distributed benchmark platform prototype with verified
+> local/Docker execution, real telemetry/validation/scoring, live leaderboard,
+> and renderable cloud/data-plane IaC.
+
+Do not call it a fully production-ready multi-tenant cloud service until the P0
+items above are complete and measured in a real cluster.
