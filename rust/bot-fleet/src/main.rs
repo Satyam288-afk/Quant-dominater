@@ -524,7 +524,13 @@ async fn run_bot(
                         ).await?;
                     }
                     Some(Ok(_)) => {}
-                    Some(Err(err)) => return Err(err.into()),
+                    Some(Err(err)) => {
+                        // Read error mid-run (engine crash / reset): stop reading
+                        // and finish with the stats gathered so far instead of
+                        // discarding this bot's whole contribution.
+                        eprintln!("bot {bot_id} read error mid-run: {err}");
+                        break;
+                    }
                     None => break,
                 }
             }
@@ -643,7 +649,14 @@ async fn run_bot_closed_loop(
                     .await?;
                 }
                 Ok(Some(Ok(_))) => {}
-                Ok(Some(Err(err))) => return Err(err.into()),
+                Ok(Some(Err(err))) => {
+                    // Read error mid-run (engine crash / reset): return the
+                    // stats accumulated so far rather than discarding the whole
+                    // bot's contribution. Still-pending orders are timeouts.
+                    eprintln!("bot {bot_id} read error mid-run: {err}");
+                    stats.timeouts += pending.len() as u64;
+                    return Ok(stats);
+                }
                 Ok(None) => {
                     // Engine closed the connection: whatever is still pending
                     // can never be acked.
@@ -911,8 +924,13 @@ async fn handle_engine_message(
     output_tx: &mpsc::UnboundedSender<Value>,
     sink: &Arc<dyn TelemetrySink>,
 ) -> Result<()> {
-    let message: Value =
-        serde_json::from_str(text).with_context(|| format!("decode engine message: {text}"))?;
+    // Drop an unparseable frame rather than erroring out of the bot: a hostile
+    // or buggy engine emitting one line of garbage must not tear down the whole
+    // connection and discard the bot's accumulated, correctly-measured stats.
+    // This is parity with the pooled reader (see pool.rs: `Err(_) => continue`).
+    let Ok(message) = serde_json::from_str::<Value>(text) else {
+        return Ok(());
+    };
     let message_type = message.get("type").and_then(Value::as_str).unwrap_or("");
     let recv_ts_ns = now_ns();
 

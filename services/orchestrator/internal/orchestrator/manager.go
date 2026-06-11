@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -346,6 +347,18 @@ func (m *Manager) execute(ctx context.Context, run *model.BenchmarkRun) {
 			cancel()
 		}
 		<-m.sem // release the build slot acquired by the spawning caller
+	}()
+	// Any panic on this detached goroutine would otherwise terminate the whole
+	// orchestrator process — killing every other team's in-flight run. Recover
+	// it into a FAILED run instead. Registered after the cleanup defer so it
+	// runs first (LIFO): recover and mark the run failed, then the cleanup defer
+	// still releases the build slot and cancel.
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("orchestrator run panicked",
+				"run_id", run.RunID, "panic", r, "stack", string(debug.Stack()))
+			m.fail(ctx, run, "PANIC", fmt.Errorf("panic on execute path: %v", r))
+		}
 	}()
 
 	run.ArtifactDir = filepath.Join(m.runRoot, run.RunID)
