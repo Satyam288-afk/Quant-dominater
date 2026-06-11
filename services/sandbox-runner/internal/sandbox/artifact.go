@@ -42,37 +42,77 @@ func submissionArtifactRoot(repoRoot string) string {
 	return filepath.Join(repoRoot, ".artifacts", "submissions")
 }
 
-func prepareBuildContext(src string, dst string, language string) error {
+// prepareBuildContext extracts the artifact into the build dir and ensures a
+// Dockerfile is present. It returns contestantDockerfile=true when the artifact
+// shipped its OWN Dockerfile (which takes precedence) — the caller treats that
+// build as untrusted (no network, see DockerRunner.Build). A contestant
+// Dockerfile is validated to reject build-time remote fetches (`ADD <url>`),
+// which the daemon performs OUTSIDE the build network namespace and so survives
+// even a network=none build.
+func prepareBuildContext(src string, dst string, language string) (contestantDockerfile bool, err error) {
 	info, err := os.Stat(src)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := os.MkdirAll(dst, 0o755); err != nil {
-		return err
+		return false, err
 	}
 
 	switch {
 	case info.IsDir():
 		if err := copyDir(src, dst); err != nil {
-			return err
+			return false, err
 		}
 	case strings.EqualFold(filepath.Ext(src), ".zip"):
 		if err := unzip(src, dst); err != nil {
-			return err
+			return false, err
 		}
 	default:
 		if err := copyFile(src, filepath.Join(dst, filepath.Base(src))); err != nil {
-			return err
+			return false, err
 		}
 		if language == "go" && strings.EqualFold(filepath.Ext(src), ".go") && !fileExists(filepath.Join(dst, "go.mod")) {
 			if err := os.WriteFile(filepath.Join(dst, "go.mod"), []byte("module contestant\n\ngo 1.22\n"), 0o644); err != nil {
-				return err
+				return false, err
 			}
 		}
 	}
 
-	if !fileExists(filepath.Join(dst, "Dockerfile")) {
-		return writeDefaultDockerfile(dst, language)
+	dockerfilePath := filepath.Join(dst, "Dockerfile")
+	if !fileExists(dockerfilePath) {
+		return false, writeDefaultDockerfile(dst, language)
+	}
+	if err := validateUntrustedDockerfile(dockerfilePath); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+// validateUntrustedDockerfile rejects a contestant Dockerfile that fetches a
+// remote source at build time (`ADD http://...`, `ADD https://...`). Docker's
+// legacy builder fetches such URLs daemon-side, outside the build container's
+// network namespace, so they exfiltrate / SSRF even when the build runs with
+// NetworkMode=none. Base-image pulls (FROM) and local COPY/ADD are unaffected.
+func validateUntrustedDockerfile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 || !strings.EqualFold(fields[0], "ADD") {
+			continue
+		}
+		for _, arg := range fields[1:] {
+			low := strings.ToLower(arg)
+			if strings.HasPrefix(low, "http://") || strings.HasPrefix(low, "https://") {
+				return fmt.Errorf("contestant Dockerfile uses remote ADD (%q); build-time network fetches are not allowed", arg)
+			}
+		}
 	}
 	return nil
 }
@@ -206,14 +246,21 @@ func unzip(src string, dst string) error {
 			return err
 		}
 		// Hard cap on bytes actually written, so a lying header can't slip the
-		// declared-size screen above. +1 so hitting the cap exactly still trips.
-		written, err := copyReaderToFile(io.LimitReader(srcFile, maxZipTotalBytes-total+1), target, file.FileInfo().Mode())
-		_ = srcFile.Close()
+		// declared-size screen above. Write at most the remaining budget, then
+		// probe one more byte: if the entry still had data, it exceeds the cap —
+		// so we refuse WITHOUT having let the over-cap byte reach disk (the prior
+		// `+1` sentinel let exactly one byte past the cap land before refusing).
+		remaining := maxZipTotalBytes - total
+		written, err := copyReaderToFile(io.LimitReader(srcFile, remaining), target, file.FileInfo().Mode())
 		if err != nil {
+			_ = srcFile.Close()
 			return err
 		}
+		var probe [1]byte
+		n, _ := srcFile.Read(probe[:])
+		_ = srcFile.Close()
 		total += written
-		if total > maxZipTotalBytes {
+		if n > 0 {
 			return fmt.Errorf("zip expands beyond %d bytes; refusing to extract", int64(maxZipTotalBytes))
 		}
 	}

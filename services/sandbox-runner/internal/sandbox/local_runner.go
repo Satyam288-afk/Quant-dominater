@@ -80,7 +80,7 @@ func (r *LocalRunner) Build(ctx context.Context, req BuildRequest) (ImageRef, er
 
 	buildID := fmt.Sprintf("%s_%d", sanitizeDockerTag(req.SubmissionID), time.Now().UnixNano())
 	buildDir := filepath.Join(r.runRoot, "builds", buildID)
-	if err := prepareBuildContext(artifactPath, buildDir, req.Language); err != nil {
+	if _, err := prepareBuildContext(artifactPath, buildDir, req.Language); err != nil {
 		return ImageRef{}, err
 	}
 

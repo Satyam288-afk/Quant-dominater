@@ -29,6 +29,17 @@ import (
 
 const dockerContainerPort = "8080"
 
+// Build-phase resource ceilings. A contestant Dockerfile's RUN steps run as
+// root with no cgroup limits unless we set these; nproc is the fork-bomb guard
+// (the legacy builder does not map PidsLimit to cgroup pids.max).
+const (
+	buildMemoryBytes = int64(2) << 30 // 2 GiB
+	buildCPUPeriod   = int64(100_000)
+	buildCPUQuota    = int64(200_000) // 2 cores
+	buildPidsLimit   = int64(512)     // nproc ulimit
+	buildNofile      = int64(4096)
+)
+
 type DockerRunner struct {
 	repoRoot string
 	runRoot  string
@@ -91,7 +102,8 @@ func (r *DockerRunner) Build(ctx context.Context, req BuildRequest) (ImageRef, e
 
 	buildID := fmt.Sprintf("%s_%d", sanitizeDockerTag(req.SubmissionID), time.Now().UnixNano())
 	buildDir := filepath.Join(r.runRoot, "builds", buildID)
-	if err := prepareBuildContext(artifactPath, buildDir, req.Language); err != nil {
+	contestantDockerfile, err := prepareBuildContext(artifactPath, buildDir, req.Language)
+	if err != nil {
 		return ImageRef{}, err
 	}
 
@@ -110,10 +122,30 @@ func (r *DockerRunner) Build(ctx context.Context, req BuildRequest) (ImageRef, e
 	if err != nil {
 		return ImageRef{}, err
 	}
+	// Bound the build itself: a contestant Dockerfile's RUN steps execute as
+	// root, so cap memory/CPU and — via the nproc ulimit, the real fork-bomb
+	// guard on the legacy builder, which does not translate to cgroup pids.max —
+	// processes and file descriptors, mirroring the runtime container's limits.
+	// Without this a single build could OOM or fork-bomb the whole host VM.
 	buildOptions := types.ImageBuildOptions{
 		Tags:        []string{imageTag},
 		Remove:      true,
 		ForceRemove: true,
+		Memory:      buildMemoryBytes,
+		MemorySwap:  buildMemoryBytes, // == Memory -> no swap
+		CPUQuota:    buildCPUQuota,
+		CPUPeriod:   buildCPUPeriod,
+		Ulimits: []*units.Ulimit{
+			{Name: "nproc", Soft: buildPidsLimit, Hard: buildPidsLimit},
+			{Name: "nofile", Soft: buildNofile, Hard: buildNofile},
+		},
+	}
+	// A contestant-supplied Dockerfile is untrusted: cut its build-time network
+	// so a RUN step can't exfiltrate, SSRF an internal service, or pull a
+	// payload. Our generated default Dockerfiles are trusted and legitimately
+	// pull modules / base layers, so they keep network access.
+	if contestantDockerfile {
+		buildOptions.NetworkMode = "none"
 	}
 	if dockerBuildKitEnabled() {
 		buildOptions.Version = types.BuilderBuildKit
@@ -173,6 +205,16 @@ func (r *DockerRunner) Start(ctx context.Context, req StartRequest) (SandboxHand
 		eventsPath = filepath.Join(dir, "engine-events.jsonl")
 	}
 	if err := os.MkdirAll(filepath.Dir(eventsPath), 0o755); err != nil {
+		return SandboxHandle{}, err
+	}
+
+	// The engine's writable mount is a DEDICATED subdir, NOT the run artifact
+	// dir itself. The resource sampler writes the trusted resource.json (the 10%
+	// score input) into the parent run dir; that file must stay out of the
+	// container's reach or a hostile engine could overwrite it with forged,
+	// flattering numbers (it writes to /artifacts via this rw bind).
+	engineOutDir := filepath.Join(filepath.Dir(eventsPath), "engine-out")
+	if err := os.MkdirAll(engineOutDir, 0o755); err != nil {
 		return SandboxHandle{}, err
 	}
 
@@ -285,7 +327,7 @@ func (r *DockerRunner) Start(ctx context.Context, req StartRequest) (SandboxHand
 		&container.HostConfig{
 			AutoRemove: true,
 			Binds: []string{
-				filepath.Dir(eventsPath) + ":/artifacts",
+				engineOutDir + ":/artifacts",
 			},
 			CapDrop:        []string{"ALL"},
 			NetworkMode:    networkPlan.mode,

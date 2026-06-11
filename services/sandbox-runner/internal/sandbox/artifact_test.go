@@ -46,7 +46,7 @@ func TestPrepareBuildContextSingleGoFile(t *testing.T) {
 	}
 
 	dst := filepath.Join(t.TempDir(), "build")
-	if err := prepareBuildContext(src, dst, "go"); err != nil {
+	if _, err := prepareBuildContext(src, dst, "go"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -85,6 +85,61 @@ func TestDefaultDockerfilePerLanguage(t *testing.T) {
 
 	if err := writeDefaultDockerfile(t.TempDir(), "haskell"); err == nil {
 		t.Fatal("expected unsupported language to error")
+	}
+}
+
+func TestPrepareBuildContextFlagsContestantDockerfile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc main(){}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM alpine:3.20\nCOPY . .\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	contestant, err := prepareBuildContext(dir, filepath.Join(t.TempDir(), "out"), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contestant {
+		t.Fatal("a shipped Dockerfile must be flagged as contestant-supplied (untrusted)")
+	}
+
+	// No Dockerfile -> generated default -> trusted.
+	dir2 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir2, "main.go"), []byte("package main\nfunc main(){}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	contestant2, err := prepareBuildContext(dir2, filepath.Join(t.TempDir(), "out2"), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contestant2 {
+		t.Fatal("a generated default Dockerfile must be flagged as trusted")
+	}
+}
+
+func TestPrepareBuildContextRejectsRemoteADD(t *testing.T) {
+	for _, df := range []string{
+		"FROM alpine:3.20\nADD https://example.com/payload /p\n",
+		"FROM alpine:3.20\nADD http://169.254.169.254/latest /p\n",
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(df), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := prepareBuildContext(dir, filepath.Join(t.TempDir(), "out"), "binary")
+		if err == nil || !strings.Contains(err.Error(), "remote ADD") {
+			t.Fatalf("expected remote ADD rejection for %q, got %v", df, err)
+		}
+	}
+
+	// A local ADD/COPY must still be allowed.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM alpine:3.20\nADD ./src /src\nCOPY . .\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepareBuildContext(dir, filepath.Join(t.TempDir(), "out"), "binary"); err != nil {
+		t.Fatalf("local ADD/COPY must be allowed, got %v", err)
 	}
 }
 

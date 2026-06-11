@@ -24,7 +24,7 @@ plus **binary** for a pre-compiled engine. See `writeDefaultDockerfile`.
 
 | Layer | Control | Status |
 |---|---|---|
-| Build isolation | BuildKit (`SANDBOX_DOCKER_BUILDKIT=1`), build logs captured; ZIP path-traversal **and** zip-bomb (ratio / total-size / entry-count) rejected; local-mode build runs `CGO_ENABLED=0` + wall-clock timeout + process-group kill | ✅ implemented |
+| Build isolation | ZIP path-traversal **and** zip-bomb (ratio / total-size / entry-count) rejected; a **contestant-supplied Dockerfile builds with `--network=none`** and remote `ADD <url>` is rejected (no build-time egress / SSRF / payload pull); **every build is memory/CPU/pid(`nproc`)/fd capped** (legacy builder); local-mode build runs `CGO_ENABLED=0` + wall-clock timeout + process-group kill | ✅ implemented |
 | Runtime isolation | pluggable OCI runtime via `SANDBOX_DOCKER_RUNTIME` (e.g. `runsc`/gVisor) | ✅ hook |
 | CPU fairness | cgroups `NanoCPUs` quota (always) + **CPU pinning** (`CpusetCpus` / `SANDBOX_CPUSET`) on Linux hosts | ✅ Linux / quota-only on Docker Desktop |
 | Memory fairness | cgroups `Memory` cap, **swap disabled** (`MemorySwap==Memory`, swappiness 0) | ✅ implemented |
@@ -123,6 +123,60 @@ positives against correct engines (the worse failure). It does **not** weaken
 the demonstrable correctness story: a *broken* engine is still caught
 (`run-price-time-proof.sh`), and `engine_seq` monotonicity, two-sided fill
 consistency, unknown-order fills and over-fills are all independently checked.
+
+## Live Docker red-team (the build phase, the scoring channel, control-plane authz)
+
+A four-front adversarial audit drove the **real** Docker isolation boundary
+(Docker 29.1.5) as a malicious contestant — escape, host-read, exfil, resource
+DoS, score gaming, and API abuse — with reproducible PoCs. The **runtime**
+container held on every probe: `CapDrop ALL` (CapEff=0), `no-new-privileges`,
+read-only rootfs, internal network with black-holed DNS (egress fully blocked),
+no `docker.sock`, no host-FS traversal, and every resource cap (mem OOM, pid
+512, tmpfs 64m, CPU quota) triggered. Archive extraction held too. The holes
+were elsewhere and are now closed:
+
+- **Build ran unsandboxed** (`docker_runner.go`). A contestant Dockerfile always
+  wins, and its `RUN` steps executed as root with **full internet egress** and
+  **no resource limits** — build-time RCE, exfiltration/SSRF, and a fork-bomb /
+  memory-balloon that could take down the whole host VM. Now: a contestant
+  Dockerfile builds with `NetworkMode=none`, remote `ADD <url>` (which the
+  daemon fetches *outside* the build netns, surviving `network=none`) is
+  rejected at `prepareBuildContext`, and **every** build is capped
+  (memory, CPU, `nproc` fork-bomb guard, `nofile`). Trusted *generated* default
+  Dockerfiles keep egress (they legitimately pull modules/base layers).
+- **Forgeable scoring input** (`docker_runner.go`, `manager.go`). The artifact
+  dir was bind-mounted read-write, and the resource sampler wrote the trusted
+  `resource.json` (the 10 % `ResourceScore`) into that same dir — so a hostile
+  root engine could overwrite it with flattering numbers (a deterministic
+  +7.5 score swing). The engine's writable mount is now a **dedicated
+  `engine-out/` subdir**; `resource.json` lives in the parent run dir, outside
+  the container's reach.
+- **Auth bypassed for every GET** (`orchestrator/internal/api/auth.go`). A
+  one-character bug (`||` where the sibling services use `&&`) exempted *all*
+  GET requests from the bearer-token check, leaking every team's run configs,
+  scores, seeds and host paths. Fixed and covered by a regression test.
+- **Zip byte-cap off-by-one** (`artifact.go`): the cumulative 512 MiB cap let
+  exactly one over-cap byte reach disk before refusing; now it refuses without
+  writing the over-cap byte.
+
+### Residual / documented (not closed under the deadline)
+
+- **BuildKit drops the build memory/CPU caps.** The `nproc`/`nofile` ulimits and
+  `network=none` hold under BuildKit, but `SANDBOX_DOCKER_BUILDKIT=1` makes the
+  daemon ignore the `Memory`/`CPUQuota` build options. The **default** path
+  (legacy builder) applies all caps; enabling BuildKit needs a `buildkitd`
+  `--memory` path before it is equivalent.
+- **Writable artifact mount has no disk quota.** `engine-out/` is host-VM-disk
+  backed; a hostile engine can still fill it (host disk DoS) — size it with a
+  quota-backed volume or a bounded tmpfs in production.
+- **Docker mode runs the engine as uid 0** (no `--user`), unlike the K8s
+  template's `runAsUser 65532`. Well-mitigated by `CapDrop ALL` +
+  `no-new-privileges` + seccomp (every privileged op denied), so it is
+  defense-in-depth only; the doc's "1:1 parity" claim is the gap.
+- **`engine_seq` arrival-order gaming** — the boundary documented above. A
+  `ts_ns`-primary replay was considered and **rejected**: `ts_ns` is fleet
+  *send* time, which under concurrency is not arrival order, so making it
+  authoritative would false-positive correct engines — the worse failure.
 
 ## Allowed Network Paths
 
