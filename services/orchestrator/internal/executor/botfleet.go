@@ -63,8 +63,12 @@ func (b *BotFleet) Run(ctx context.Context, run *model.BenchmarkRun, endpoint st
 	}
 	// Prefer the pre-built release fleet: a console-triggered run must not pay
 	// a cargo compile (minutes, on a cold cache) inside the judged pipeline.
-	// Fall back to cargo run only when the binary has not been built yet.
-	command := filepath.Join(b.repoRoot, "target", "release", "bot-fleet")
+	// Container images can set BOT_FLEET_BIN to a packaged binary; local dev
+	// falls back to target/release and then cargo run.
+	command := strings.TrimSpace(os.Getenv("BOT_FLEET_BIN"))
+	if command == "" {
+		command = filepath.Join(b.repoRoot, "target", "release", "bot-fleet")
+	}
 	args := fleetArgs
 	if _, err := os.Stat(command); err != nil {
 		command = "cargo"

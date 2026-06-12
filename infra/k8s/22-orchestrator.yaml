@@ -1,7 +1,8 @@
-# Orchestrator: drives the benchmark lifecycle state machine
-# (QUEUED -> BUILDING -> SANDBOX_STARTING -> HEALTHCHECKING -> BENCHMARKING ->
-#  VALIDATING -> SCORING -> FINISHED) by calling submission-api, sandbox-runner,
-# and launching the bot-fleet Job per run.
+# Experimental upload-driven orchestrator manifest, intentionally not included
+# by the base kustomization. The current Go orchestrator executes bot-fleet and
+# validator binaries locally; production Kubernetes orchestration needs a
+# Kubernetes bot-fleet executor and durable artifact storage before this
+# Deployment should be scaled above zero.
 apiVersion: v1
 kind: Service
 metadata:
@@ -19,7 +20,7 @@ metadata:
   name: orchestrator
   namespace: iicpc
 spec:
-  replicas: 1
+  replicas: 0
   selector: { matchLabels: { app: orchestrator } }
   template:
     metadata:

@@ -25,8 +25,12 @@ func (v *Validator) Run(ctx context.Context, run *model.BenchmarkRun) (*model.Va
 		"--contestant-outputs", filepath.Join(run.ArtifactDir, "contestant_outputs.jsonl"),
 	}
 	// Same policy as the fleet spawn: never pay a cargo compile inside the
-	// judged pipeline when a release binary is already built.
-	command := filepath.Join(v.repoRoot, "target", "release", "validator")
+	// judged pipeline when a release binary is already built. Container images
+	// can set VALIDATOR_BIN to a packaged binary.
+	command := strings.TrimSpace(os.Getenv("VALIDATOR_BIN"))
+	if command == "" {
+		command = filepath.Join(v.repoRoot, "target", "release", "validator")
+	}
 	args := validatorArgs
 	if _, err := os.Stat(command); err != nil {
 		command = "cargo"

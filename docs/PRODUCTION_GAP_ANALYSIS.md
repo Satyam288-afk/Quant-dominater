@@ -5,7 +5,7 @@ brief. The benchmark core, the full data plane, the cloud-native IaC, and the
 browser console are all built and exercised. What remains is the work that
 separates a demonstrable platform from a hardened multi-tenant production
 service: durable databases, identity-aware auth, an automated malicious-code
-fixture suite, observability, and CI/CD. The consolidated residual list lives in
+fixture suite, observability, and release/deployment automation. The consolidated residual list lives in
 [RESIDUALS.md](RESIDUALS.md).
 
 ## Current Status Against Problem Expectations
@@ -17,7 +17,7 @@ fixture suite, observability, and CI/CD. The consolidated residual list lives in
 | No internet egress | Working | Docker mode black-holes DNS + per-sandbox internal network when `network_egress=false`; K8s `NetworkPolicy` default-deny |
 | gVisor / stronger sandbox escape resistance | Hook + manual proof | `SANDBOX_DOCKER_RUNTIME=runsc` supported; runtime boundary red-teamed by hand ([SECURITY_SANDBOX.md](SECURITY_SANDBOX.md)); automated fixture suite is still open |
 | Distributed load generator | Working | Rust Tokio `bot-fleet`, deterministic order stream, WebSocket connection pooling, mixed limit/market/cancel flow |
-| Thousands of bots / horizontal scale | Working core + cloud design | Single-process fleet multiplexes 10k virtual bots; `--pod-index` offsets global IDs so an Indexed K8s Job shards across pods (`infra/k8s/31-bot-fleet-job.yaml`). Multi-node figures are designed but unmeasured (see [RESIDUALS.md](RESIDUALS.md)) |
+| Thousands of bots / horizontal scale | Working core + measured kind proof | Single-process fleet multiplexes 10k virtual bots; `--pod-index` offsets global IDs so an Indexed K8s Job shards across pods (`infra/k8s/31-bot-fleet-job.yaml`). A 4-node `kind` sweep measured 2/4/8 pods scaling linearly to ~8k orders/s with zero drops; the full 10k-bot ceiling still needs a larger cluster (see [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md#multi-node-horizontal-scale-measured-on-kind) and [RESIDUALS.md](RESIDUALS.md)) |
 | Limit orders, market orders, cancels | Working | Fleet sends a realistic mix across a price ladder; reference orderbook and validator are market/cancel aware ([BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md)) |
 | FIX / REST / WebSocket adapters | Working (brief's "OR" satisfied) | WebSocket is the benchmark order path; REST is a documented fallback on the stub path; FIX is a deliberate scope decision, not a gap |
 | Telemetry and validation ingester | Working | `bot-fleet --backend live` → Redpanda → `telemetry-ingester` → TimescaleDB (`metrics_raw`) + Redis live state; wired end-to-end by `scripts/run-live-demo.sh` |
@@ -25,7 +25,7 @@ fixture suite, observability, and CI/CD. The consolidated residual list lives in
 | Real-time leaderboard and analytics | Working | Go leaderboard API, WebSocket fanout, React UI, per-run p99 sparkline + per-second timeseries from Timescale |
 | Replay/audit links | Working | `console-api` exposes `GET /api/runs/{id}/artifacts` (list) and `/artifacts/{name}` (download); the browser console inspects the run's artifact set |
 | Docker Compose from scratch | Working | `infra/docker-compose` brings up Redpanda + TimescaleDB + Redis; `make live-demo` drives the full path |
-| Kubernetes manifests | Working (validated cell) | `infra/k8s`: namespaces, RBAC, data plane, control plane, HPAs, NetworkPolicy, per-run Job/Pod templates — 32 resources pass `kubeconform -strict` (k8s 1.30) |
+| Kubernetes manifests | Working (validated cell) | `infra/k8s`: namespaces, RBAC, data plane, control plane, HPAs, NetworkPolicy, per-run Job/Pod templates — `make k8s-validate` passes `kubeconform -strict` (k8s 1.30) on the kustomized cell and standalone run templates |
 | Terraform cloud provisioning | Working (validated) | `infra/terraform`: AWS VPC + EKS (platform + tainted sandbox node groups) + ECR; `tofu validate` passes, `tofu fmt` clean |
 
 ## What Is Production-Like Now
@@ -59,8 +59,10 @@ fixture suite, observability, and CI/CD. The consolidated residual list lives in
   `SERVICE_AUTH_TOKEN` or service-specific token env vars; orchestrator and
   console clients forward those tokens.
 - Validated cloud-native IaC: `make k8s-validate` (kustomize + `kubeconform
-  -strict`, 32 resources) and `make tf-validate` (`tofu fmt` + `init
+  -strict`) and `make tf-validate` (`tofu fmt` + `init
   -backend=false` + `validate`) both pass with no cluster or cloud account.
+- A GitHub Actions CI workflow is present for Go tests, Rust tests, frontend
+  build/audit, shell syntax checks, and Kubernetes/Terraform validation.
 - Tests for Rust core and Go services.
 
 ## What Is Not Production-Level Yet
@@ -82,10 +84,13 @@ deferral rationale in [RESIDUALS.md](RESIDUALS.md).
   are hooks rather than the default path.
 - No production observability stack: traces, structured logs, service metrics,
   alerting.
-- No CI workflow covering Go, Rust, frontend build, IaC validation, or security
-  scanning (`make k8s-validate` / `make tf-validate` run locally today).
-- Multi-node bot-fleet and ingester throughput figures are designed-for but not
-  measured; reported numbers are single-host (see [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md)).
+- No release-grade CI/CD pipeline. Current CI validates tests/builds/IaC, but it
+  does not publish signed images, run security scanning, deploy environments, or
+  verify rollback.
+- Multi-node bot-fleet scale-out is measured on a local 4-node `kind` cluster,
+  but not at the full 10k-bot ceiling. Multi-node ingester throughput is still
+  designed-for rather than load-tested (see [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md)
+  and [RESIDUALS.md](RESIDUALS.md)).
 
 ## Recommended Next Milestones
 
@@ -114,15 +119,14 @@ below.
 
 ### P1 Hardening
 
-1. Add CI for Go tests, Rust tests, frontend build, IaC validation, linting, and
-   dependency/security scanning.
+1. Extend CI with linting, dependency/security scanning, image publishing,
+   environment deploys, and rollback verification.
 2. Add Prometheus/OpenTelemetry metrics, structured logs, tracing, dashboards,
    and alerting.
 3. Promote the single Redpanda/Timescale/Redis instances to the managed /
    operator-backed stores the Terraform node groups are sized for.
 4. Add remote Terraform state and environment-specific variables.
-5. Run and publish multi-node benchmark results.
+5. Run and publish larger-cluster 10k-bot and multi-node ingester throughput
+   results.
 6. Add a production runbook covering deploy, rollback, cleanup, incident
    response, and replay/audit workflows.
-</content>
-</invoke>

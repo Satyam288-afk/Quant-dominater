@@ -49,9 +49,9 @@ kubectl kustomize infra/k8s | kubeconform -strict -summary -kubernetes-version 1
 The **shipped** sandbox runtime — proven by every demo in this repo — is a
 single-host subprocess fleet: the sandbox-runner runs in `local` or `docker`
 mode and launches the contestant engine as a host process / container. The
-manifests here are the **validated cloud-native template** (32 resources pass
-`kubeconform -strict`, with HPAs and NetworkPolicy) designed to scale that same
-benchmark cell across a cluster; the `kubernetes` runner mode that would apply
+manifests here are the **validated cloud-native template** (`make k8s-validate`
+passes `kubeconform -strict`, with HPAs and NetworkPolicy) designed to scale
+that same benchmark cell across a cluster; the `kubernetes` runner mode that would apply
 `40-sandbox-pod-template` per run is a documented next step, not yet running
 code. `21-sandbox-runner.yaml` therefore sets `SANDBOX_RUNNER_MODE=docker` (a
 mode the runner actually supports) rather than `kubernetes`.

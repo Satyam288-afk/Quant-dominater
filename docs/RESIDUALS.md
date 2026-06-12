@@ -24,11 +24,10 @@ risk after the listed mitigation, in the demo/benchmark context.
   context — not the raw severity of an unmitigated bug.
 - Every row links to the detailed write-up that found and reasoned about it.
 - Items 1–4 are the sandbox/security residuals from
-  [SECURITY_SANDBOX.md](SECURITY_SANDBOX.md); items 5–7 are the unmeasured-scale
+  [SECURITY_SANDBOX.md](SECURITY_SANDBOX.md); items 5–7 are the scale-ceiling
   and soak residuals from [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md) and the
   [infra/k8s README](../infra/k8s/README.md); items 8–9 are the multi-tenancy and
   automated-coverage gaps tracked in
   [PRODUCTION_GAP_ANALYSIS.md](PRODUCTION_GAP_ANALYSIS.md).
 - Nothing here is a surprise at demo time: each is a known boundary with a
   mitigation in place and a clear path to closure.
-</content>

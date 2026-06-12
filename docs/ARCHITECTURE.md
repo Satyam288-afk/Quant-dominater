@@ -106,4 +106,3 @@ identity-aware auth, an automated malicious-code fixture suite, observability,
 CI/CD, and the in-cluster `kubernetes` runner mode — is tracked honestly in
 [PRODUCTION_GAP_ANALYSIS.md](PRODUCTION_GAP_ANALYSIS.md) and
 [RESIDUALS.md](RESIDUALS.md).
-
