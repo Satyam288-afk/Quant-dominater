@@ -16,6 +16,7 @@ spec:
       containers:
         - name: telemetry-ingester
           image: ghcr.io/iicpc/telemetry-ingester:latest # built with --features live
+          imagePullPolicy: IfNotPresent
           args: ["--source", "kafka"]
           env:
             - { name: KAFKA_BROKERS,         valueFrom: { configMapKeyRef: { name: platform-config, key: KAFKA_BROKERS } } }

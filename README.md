@@ -34,6 +34,7 @@ implemented.
 | **1. Working prototype** (upload → deploy → load test → scoring) | `services/*`, `rust/*`, `web/`, `scripts/run-live-demo.sh` — measured numbers in [docs/BENCHMARK_RESULTS.md](docs/BENCHMARK_RESULTS.md) (~50k orders/s driven, p99 + peak-TPS curve, correctness held over 191k fills) |
 | **2. Architecture Blueprint** | [docs/BLUEPRINT.md](docs/BLUEPRINT.md) (+ ARCHITECTURE, API_CONTRACT, SCORING, SECURITY_SANDBOX, [RESILIENCE](docs/RESILIENCE.md), [PROFILING](docs/PROFILING.md)) |
 | **3. Infrastructure as Code** | [infra/k8s](infra/k8s) (renderable shared data-plane manifests, HPA, NetworkPolicy, disabled control-plane templates), [infra/terraform](infra/terraform) (EKS/ECR/VPC), [infra/docker-compose](infra/docker-compose) |
+| **Validation evidence** | [docs/HACKATHON_VALIDATION.md](docs/HACKATHON_VALIDATION.md), `scripts/validate-kind-data-plane.sh` |
 
 ## Current Components
 
@@ -59,7 +60,9 @@ implemented.
 | `infra/k8s` | Kubernetes shared data-plane IaC plus disabled sandbox/orchestrator templates |
 | `infra/terraform` | Terraform: AWS VPC + EKS + ECR |
 | `infra/docker-compose` | Redpanda + TimescaleDB + Redis for the full local data plane |
+| `infra/dockerfiles` | Container images for active Kubernetes custom services |
 | `docs/BLUEPRINT.md` | Comprehensive architecture blueprint |
+| `docs/HACKATHON_VALIDATION.md` | Final validation checklist and evidence commands |
 | `fixtures` | Tiny validation fixtures |
 | `scripts/run-local-demo.sh` | One-command local slice demo (JSONL) |
 | `scripts/run-live-demo.sh` | Full data-plane demo (Redpanda→Timescale→Redis→leaderboard) |

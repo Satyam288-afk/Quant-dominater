@@ -39,8 +39,12 @@ spec:
       containers:
         - name: leaderboard-api
           image: ghcr.io/iicpc/leaderboard-api:latest
+          imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef: { name: platform-config }
+          env:
+            - { name: REPO_ROOT, value: "/app" }
+            - { name: LEADERBOARD_UI_DIR, value: "/app/web/leaderboard-ui" }
           ports:
             - { name: http, containerPort: 9500 }
           resources:

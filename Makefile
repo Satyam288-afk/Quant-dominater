@@ -1,4 +1,4 @@
-.PHONY: proto-go test-go test-rust bot-fleet validator stub-engine rust-engine validate-fixture control-panel submission-api sandbox-runner orchestrator score-engine leaderboard-api console-api web web-build k8s-validate tf-validate iac-validate live-demo chaos-demo platform-demo console-stack reset-demo-state
+.PHONY: proto-go test-go test-rust bot-fleet validator stub-engine rust-engine validate-fixture control-panel submission-api sandbox-runner orchestrator score-engine leaderboard-api console-api web web-build k8s-validate tf-validate iac-validate kind-validate live-demo chaos-demo platform-demo console-stack reset-demo-state
 
 PROTOC_GEN_GO ?= $(shell go env GOPATH)/bin/protoc-gen-go
 
@@ -86,6 +86,9 @@ tf-validate:
 		(terraform fmt -check -recursive && terraform init -backend=false -input=false >/dev/null && terraform validate)
 
 iac-validate: k8s-validate tf-validate
+
+kind-validate:
+	./scripts/validate-kind-data-plane.sh
 
 # Console (colleague's local benchmark console)
 console-api:

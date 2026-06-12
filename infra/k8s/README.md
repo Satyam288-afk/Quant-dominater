@@ -34,6 +34,16 @@ kubeconform -strict -summary -kubernetes-version 1.30.0 \
   infra/k8s/40-sandbox-pod-template.yaml
 ```
 
+## Live Kind Proof
+
+```bash
+./scripts/validate-kind-data-plane.sh
+```
+
+This builds the real custom images from `infra/dockerfiles`, loads them into a
+local `kind` cluster, applies the active base, waits for workloads to become
+ready, and writes evidence under `.runs/kind-validation/`.
+
 ## Active Base Resources
 
 | File | Resources | Role |
