@@ -61,7 +61,7 @@ type sandboxHandle struct {
 func NewSandboxEngine(baseURL string) *SandboxEngine {
 	return &SandboxEngine{
 		baseURL:   strings.TrimRight(baseURL, "/"),
-		client:    &http.Client{Timeout: 30 * time.Second},
+		client:    &http.Client{},
 		token:     firstEnv("SANDBOX_RUNNER_AUTH_TOKEN", "SERVICE_AUTH_TOKEN"),
 		imageRefs: make(map[string]string),
 	}

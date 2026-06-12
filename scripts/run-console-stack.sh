@@ -9,6 +9,8 @@ SANDBOX_ADDR="${SANDBOX_RUNNER_ADDR:-:9210}"
 ORCH_ADDR="${ORCHESTRATOR_ADDR:-:9310}"
 LEADERBOARD_ADDR="${LEADERBOARD_API_ADDR:-:9510}"
 CONSOLE_ADDR="${CONSOLE_API_ADDR:-:9700}"
+SANDBOX_MODE="${SANDBOX_RUNNER_MODE:-docker}"
+RUN_TIMEOUT="${ORCHESTRATOR_RUN_TIMEOUT:-10m}"
 
 addr_port() {
   local addr="$1"
@@ -90,22 +92,48 @@ start_service() {
   PIDS+=("$!")
 }
 
+require_sandbox_mode() {
+  case "$SANDBOX_MODE" in
+    docker)
+      if ! command -v docker >/dev/null 2>&1; then
+        echo "SANDBOX_RUNNER_MODE=docker requires the docker CLI; install Docker or run with SANDBOX_RUNNER_MODE=local" >&2
+        return 1
+      fi
+      if ! docker info >/dev/null 2>&1; then
+        echo "SANDBOX_RUNNER_MODE=docker requires a running Docker daemon; start Docker or run with SANDBOX_RUNNER_MODE=local" >&2
+        return 1
+      fi
+      ;;
+    local)
+      echo "using SANDBOX_RUNNER_MODE=local (Go-only dev path; Docker mode is the containerized prototype path)"
+      ;;
+    *)
+      echo "unsupported SANDBOX_RUNNER_MODE=$SANDBOX_MODE; expected docker or local" >&2
+      return 1
+      ;;
+  esac
+}
+
 require_port_free submission-api "$SUBMISSION_ADDR"
 require_port_free sandbox-runner "$SANDBOX_ADDR"
 require_port_free orchestrator "$ORCH_ADDR"
 require_port_free leaderboard-api "$LEADERBOARD_ADDR"
 require_port_free console-api "$CONSOLE_ADDR"
+require_sandbox_mode
 
 echo "packaging example upload artifact"
 (
   cd "$ROOT_DIR/examples/stub-engine"
-  zip -qr "$STACK_DIR/stub-engine.zip" .
+  # Omit the sample Dockerfile so the console upload exercises the sandbox
+  # runner's default Go packaging policy. Contestant-supplied Dockerfiles are
+  # still supported, but they intentionally build with network disabled.
+  zip -qr "$STACK_DIR/stub-engine.zip" . -x Dockerfile ./Dockerfile
 )
 
 start_service submission-api services/submission-api env SUBMISSION_API_ADDR="$SUBMISSION_ADDR" SUBMISSION_ARTIFACT_ROOT="$SUBMISSION_ROOT" SUBMISSION_INDEX_PATH="$SUBMISSION_INDEX" go run .
-start_service sandbox-runner services/sandbox-runner env SANDBOX_RUNNER_ADDR="$SANDBOX_ADDR" SANDBOX_RUNNER_MODE=local SUBMISSION_ARTIFACT_ROOT="$SUBMISSION_ROOT" go run .
+start_service sandbox-runner services/sandbox-runner env SANDBOX_RUNNER_ADDR="$SANDBOX_ADDR" SANDBOX_RUNNER_MODE="$SANDBOX_MODE" SUBMISSION_ARTIFACT_ROOT="$SUBMISSION_ROOT" go run .
 start_service leaderboard-api services/leaderboard-api env LEADERBOARD_API_ADDR="$LEADERBOARD_ADDR" LEADERBOARD_STORE_PATH="$LEADERBOARD_STORE" go run .
-start_service orchestrator services/orchestrator env ORCHESTRATOR_ADDR="$ORCH_ADDR" ORCHESTRATOR_AUTO_START=false ORCHESTRATOR_STORE_PATH="$SUBMISSION_INDEX" SANDBOX_RUNNER_URL="$SANDBOX_URL" LEADERBOARD_URL="$LEADERBOARD_URL" go run .
+start_service orchestrator services/orchestrator env ORCHESTRATOR_ADDR="$ORCH_ADDR" ORCHESTRATOR_AUTO_START=false ORCHESTRATOR_RUN_TIMEOUT="$RUN_TIMEOUT" ORCHESTRATOR_STORE_PATH="$SUBMISSION_INDEX" SANDBOX_RUNNER_URL="$SANDBOX_URL" LEADERBOARD_URL="$LEADERBOARD_URL" go run .
 start_service console-api services/console-api env CONSOLE_API_ADDR="$CONSOLE_ADDR" SUBMISSION_API_URL="$SUBMISSION_URL" ORCHESTRATOR_URL="$ORCH_URL" LEADERBOARD_URL="$LEADERBOARD_URL" go run .
 
 wait_health submission-api "$SUBMISSION_URL"
@@ -117,6 +145,8 @@ wait_health console-api "$CONSOLE_URL"
 echo
 echo "console UI: $CONSOLE_URL/"
 echo "example ZIP: $STACK_DIR/stub-engine.zip"
+echo "sandbox mode: $SANDBOX_MODE"
+echo "run timeout: $RUN_TIMEOUT"
 echo "logs: $STACK_DIR/*.log"
 echo "press Ctrl+C to stop services"
 

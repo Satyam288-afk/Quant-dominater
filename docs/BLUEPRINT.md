@@ -128,11 +128,12 @@ gVisor runtime. One documented difference, not a full 1:1 parity: the K8s
 template runs the engine as `runAsUser 65532` (non-root), while Docker mode
 currently runs it as uid 0 — made non-privileged by `CapDrop: ALL` +
 `no-new-privileges` + seccomp, so it is defense-in-depth only (tracked as
-[RESIDUALS.md](RESIDUALS.md) item 3). Network is default-deny: a contestant pod
-is reachable **only** by the bot fleet on `:8080` and has **no** egress (internet
-or cross-contestant), enforced by `NetworkPolicy` in K8s and DNS black-holing +
-scoped networks in Docker. RBAC scopes the runner to manage pods only in
-`iicpc-sandbox`.
+[RESIDUALS.md](RESIDUALS.md) item 3). Network is default-deny in K8s: a
+contestant pod is reachable **only** by the bot fleet on `:8080` and has **no**
+egress (internet or cross-contestant), enforced by `NetworkPolicy`. Local Docker
+mode uses a `127.0.0.1` published port for the host-driven bot fleet and
+black-holes DNS when `network_egress=false`. RBAC scopes the runner to manage
+pods only in `iicpc-sandbox`.
 
 ## 7. Scoring
 

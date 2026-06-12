@@ -125,8 +125,8 @@ If `engine_mode` is provided, it also passes:
 Docker mode publishes the engine on a random localhost port and mounts the run
 artifact directory at `/artifacts`.
 
-When `spec.network_egress=false`, Docker mode creates a per-sandbox internal
-bridge network and starts the contestant container on that network. The platform
-still publishes the engine endpoint on `127.0.0.1` for the local bot fleet, but
-the container does not receive normal outbound internet routing. The network is
-removed with the container during sandbox cleanup.
+When `spec.network_egress=false`, Docker mode keeps the container on the
+host-reachable Docker bridge so the local bot fleet can connect through a random
+`127.0.0.1` port, and black-holes DNS inside the container. Strong no-egress is
+provided by the Kubernetes NetworkPolicy path rather than Docker Desktop's
+internal-network mode, which does not publish usable host ports here.

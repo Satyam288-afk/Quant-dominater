@@ -27,7 +27,12 @@ import (
 	units "github.com/docker/go-units"
 )
 
-const dockerContainerPort = "8080"
+const (
+	dockerContainerPort         = "8080"
+	dockerContainerStartTimeout = 2 * time.Minute
+	dockerHostPortTimeout       = 60 * time.Second
+	dockerInspectTimeout        = 2 * time.Second
+)
 
 // Build-phase resource ceilings. A contestant Dockerfile's RUN steps run as
 // root with no cgroup limits unless we set these; nproc is the fork-bomb guard
@@ -227,7 +232,7 @@ func (r *DockerRunner) Start(ctx context.Context, req StartRequest) (SandboxHand
 		args = append(args, "--mode", req.EngineMode)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, dockerContainerStartTimeout)
 	defer cancel()
 
 	port, err := nat.NewPort("tcp", dockerContainerPort)
@@ -294,9 +299,9 @@ func (r *DockerRunner) Start(ctx context.Context, req StartRequest) (SandboxHand
 	// artifacts dir and a small, locked-down tmpfs.
 	tmpfs := map[string]string{"/tmp": "rw,noexec,nosuid,nodev,size=64m"}
 
-	// Network mode comes from the per-sandbox network plan (bridge, or an
-	// isolated internal network when requested). With egress disabled (the
-	// default) DNS is black-holed as defense-in-depth.
+	// Network mode comes from the per-sandbox network plan. With egress disabled
+	// (the default) DNS is black-holed as defense-in-depth; the K8s path carries
+	// the stronger NetworkPolicy-backed no-egress guarantee.
 	var dns []string
 	if !req.Spec.NetworkEgress {
 		dns = []string{"127.0.0.1"}
@@ -514,30 +519,52 @@ func newDockerClient() (*dockerclient.Client, error) {
 }
 
 func (r *DockerRunner) dockerHostPort(ctx context.Context, containerID string, port nat.Port) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
 	var lastErr error
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+	deadline := time.Now().Add(dockerHostPortTimeout)
+	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		inspect, err := r.cli.ContainerInspect(ctx, containerID)
+		inspectCtx, cancel := context.WithTimeout(ctx, dockerInspectTimeout)
+		inspect, err := r.cli.ContainerInspect(inspectCtx, containerID)
+		cancel()
 		if err != nil {
 			lastErr = err
-			time.Sleep(100 * time.Millisecond)
+			if err := sleepUntilNextDockerInspect(ctx, deadline); err != nil {
+				return "", err
+			}
 			continue
 		}
 		bindings := inspect.NetworkSettings.Ports[port]
 		if len(bindings) > 0 && bindings[0].HostPort != "" {
 			return bindings[0].HostPort, nil
 		}
-		time.Sleep(100 * time.Millisecond)
+		if err := sleepUntilNextDockerInspect(ctx, deadline); err != nil {
+			return "", err
+		}
 	}
 	if lastErr != nil {
 		return "", fmt.Errorf("docker inspect failed: %w", lastErr)
 	}
 	return "", fmt.Errorf("docker returned no port mapping for container %s", containerID)
+}
+
+func sleepUntilNextDockerInspect(ctx context.Context, deadline time.Time) error {
+	sleepFor := 100 * time.Millisecond
+	if remaining := time.Until(deadline); remaining < sleepFor {
+		sleepFor = remaining
+	}
+	if sleepFor <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(sleepFor)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (r *DockerRunner) dockerStop(ctx context.Context, containerID string) error {
@@ -557,19 +584,15 @@ type dockerNetworkPlan struct {
 	isolated bool
 }
 
-func dockerNetworkPlanFor(spec SandboxSpec, sandboxID string) dockerNetworkPlan {
-	if spec.NetworkEgress {
-		return dockerNetworkPlan{
-			mode: "bridge",
-			name: "bridge",
-		}
-	}
-
-	name := "iicpc-" + sanitizeDockerTag(sandboxID)
+func dockerNetworkPlanFor(_ SandboxSpec, _ string) dockerNetworkPlan {
+	// Docker Desktop does not publish usable localhost ports for containers on
+	// an internal user-defined network, which breaks the host-driven bot fleet.
+	// Keep Docker mode host-reachable on bridge; block normal name resolution
+	// through HostConfig.DNS when NetworkEgress is false. Hard default-deny
+	// egress is enforced by the Kubernetes NetworkPolicy path.
 	return dockerNetworkPlan{
-		mode:     container.NetworkMode(name),
-		name:     name,
-		isolated: true,
+		mode: "bridge",
+		name: "bridge",
 	}
 }
 

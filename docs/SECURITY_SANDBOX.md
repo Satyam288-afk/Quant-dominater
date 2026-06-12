@@ -30,7 +30,7 @@ plus **binary** for a pre-compiled engine. See `writeDefaultDockerfile`.
 | Memory fairness | cgroups `Memory` cap, **swap disabled** (`MemorySwap==Memory`, swappiness 0) | ✅ implemented |
 | Process limits | `PidsLimit=512`, `nofile` ulimit 4096 | ✅ implemented |
 | Syscalls | `no-new-privileges`, all caps dropped (`CapDrop: ALL`); optional profile via `SANDBOX_SECCOMP_PROFILE` (Docker default otherwise) | ✅ implemented |
-| Network | loopback-bound published port; egress denied by per-cell K8s NetworkPolicy ([infra/k8s](../infra/k8s)); Docker DNS black-holed when `network_egress=false`; `SANDBOX_DOCKER_NETWORK` to pin an internal net | ✅ implemented / ✅ K8s |
+| Network | loopback-bound published port; egress denied by per-cell K8s NetworkPolicy ([infra/k8s](../infra/k8s)); Docker DNS black-holed when `network_egress=false` | ✅ implemented / ✅ K8s |
 | Filesystem | **read-only rootfs** + locked-down tmpfs `/tmp` (`noexec,nosuid,nodev,size=64m`); writes only to mounted artifacts dir | ✅ implemented |
 | Privileges | no privileged containers, no host network, no host PID | ✅ implemented |
 | Cleanup | `AutoRemove`, force-remove on stop, build/start context timeouts | ✅ implemented |
@@ -54,8 +54,8 @@ PID limit
 CPU limit from sandbox.cpu_limit
 memory limit from sandbox.memory_limit
 localhost-only published engine port
-per-sandbox internal Docker network when network_egress=false
-container/network cleanup after run completion
+Docker DNS black-hole when network_egress=false
+container cleanup after run completion
 ```
 
 This is still not equivalent to a hardened multi-tenant cloud sandbox. The next
@@ -130,10 +130,10 @@ A four-front adversarial audit drove the **real** Docker isolation boundary
 (Docker 29.1.5) as a malicious contestant — escape, host-read, exfil, resource
 DoS, score gaming, and API abuse — with reproducible PoCs. The **runtime**
 container held on every probe: `CapDrop ALL` (CapEff=0), `no-new-privileges`,
-read-only rootfs, internal network with black-holed DNS (egress fully blocked),
-no `docker.sock`, no host-FS traversal, and every resource cap (mem OOM, pid
-512, tmpfs 64m, CPU quota) triggered. Archive extraction held too. The holes
-were elsewhere and are now closed:
+read-only rootfs, Docker DNS black-holing in local mode, K8s NetworkPolicy for
+hard no-egress, no `docker.sock`, no host-FS traversal, and every resource cap
+(mem OOM, pid 512, tmpfs 64m, CPU quota) triggered. Archive extraction held too.
+The holes were elsewhere and are now closed:
 
 - **Build ran unsandboxed** (`docker_runner.go`). A contestant Dockerfile always
   wins, and its `RUN` steps executed as root with **full internet egress** and

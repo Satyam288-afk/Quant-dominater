@@ -14,7 +14,7 @@ fixture suite, observability, and release/deployment automation. The consolidate
 |---|---|---|
 | Submission and sandboxing engine | Working | `submission-api`, `sandbox-runner` (`local` + `docker` runner modes), orchestrator FSM |
 | Strict CPU and memory limits | Working | Docker runner maps `cpu_limit`/`memory_limit` to cgroups, swap disabled, PID/nofile caps; CPU pinning on Linux hosts |
-| No internet egress | Working | Docker mode black-holes DNS + per-sandbox internal network when `network_egress=false`; K8s `NetworkPolicy` default-deny |
+| No internet egress | K8s working / Docker DNS-only | K8s `NetworkPolicy` is default-deny; Docker mode black-holes DNS when `network_egress=false` but stays on bridge so the host-driven bot fleet can connect |
 | gVisor / stronger sandbox escape resistance | Hook + manual proof | `SANDBOX_DOCKER_RUNTIME=runsc` supported; runtime boundary red-teamed by hand ([SECURITY_SANDBOX.md](SECURITY_SANDBOX.md)); automated fixture suite is still open |
 | Distributed load generator | Working | Rust Tokio `bot-fleet`, deterministic order stream, WebSocket connection pooling, mixed limit/market/cancel flow |
 | Thousands of bots / horizontal scale | Working core + measured kind proof | Single-process fleet multiplexes 10k virtual bots; `--pod-index` offsets global IDs so an Indexed K8s Job shards across pods (`infra/k8s/31-bot-fleet-job.yaml`). A 4-node `kind` sweep measured 2/4/8 pods scaling linearly to ~8k orders/s with zero drops; the full 10k-bot ceiling still needs a larger cluster (see [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md#multi-node-horizontal-scale-measured-on-kind) and [RESIDUALS.md](RESIDUALS.md)) |

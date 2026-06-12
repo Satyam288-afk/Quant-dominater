@@ -10,6 +10,11 @@ IaC proof that the platform can be spun up and scaled horizontally.
 ./scripts/run-platform-demo.sh
 ```
 
+This defaults to `SANDBOX_RUNNER_MODE=docker`, so the prototype evidence is the
+containerized path: upload ZIP -> build image -> start sandbox container -> run
+benchmark -> validate -> score. Use `SANDBOX_RUNNER_MODE=local` only for the
+fast Go-only development path.
+
 Expected evidence:
 
 - submission ZIP uploaded
@@ -37,6 +42,9 @@ artifacts=17
 ```bash
 ./scripts/run-console-stack.sh
 ```
+
+The console stack also defaults to Docker sandbox mode and accepts the same
+`SANDBOX_RUNNER_MODE=local` override for Go-only local development.
 
 Open:
 

@@ -21,6 +21,9 @@ SUBMISSION_ADDR="${SUBMISSION_API_ADDR:-:9100}"
 SANDBOX_ADDR="${SANDBOX_RUNNER_ADDR:-:9200}"
 ORCH_ADDR="${ORCHESTRATOR_ADDR:-:9300}"
 LEADERBOARD_ADDR="${LEADERBOARD_API_ADDR:-:9500}"
+SANDBOX_MODE="${SANDBOX_RUNNER_MODE:-docker}"
+RUN_TIMEOUT="${ORCHESTRATOR_RUN_TIMEOUT:-10m}"
+RUN_WAIT_SECONDS="${DEMO_WAIT_SECONDS:-900}"
 SUBMISSION_URL="http://127.0.0.1:$(addr_port "$SUBMISSION_ADDR")"
 SANDBOX_URL="http://127.0.0.1:$(addr_port "$SANDBOX_ADDR")"
 ORCH_URL="http://127.0.0.1:$(addr_port "$ORCH_ADDR")"
@@ -152,9 +155,31 @@ require_port_free submission-api "$SUBMISSION_ADDR"
 require_port_free sandbox-runner "$SANDBOX_ADDR"
 require_port_free orchestrator "$ORCH_ADDR"
 require_port_free leaderboard-api "$LEADERBOARD_ADDR"
+case "$SANDBOX_MODE" in
+  docker)
+    if ! command -v docker >/dev/null 2>&1; then
+      echo "SANDBOX_RUNNER_MODE=docker requires the docker CLI; install Docker or run with SANDBOX_RUNNER_MODE=local" >&2
+      exit 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+      echo "SANDBOX_RUNNER_MODE=docker requires a running Docker daemon; start Docker or run with SANDBOX_RUNNER_MODE=local" >&2
+      exit 1
+    fi
+    ;;
+  local)
+    echo "using SANDBOX_RUNNER_MODE=local (Go-only dev path; Docker mode is the containerized prototype path)"
+    ;;
+  *)
+    echo "unsupported SANDBOX_RUNNER_MODE=$SANDBOX_MODE; expected docker or local" >&2
+    exit 1
+    ;;
+esac
 (
   cd "$ROOT_DIR/examples/stub-engine"
-  zip -qr "$DEMO_DIR/stub-engine.zip" .
+  # Omit the sample Dockerfile so the upload path exercises the sandbox
+  # runner's default Go packaging policy. Contestant-supplied Dockerfiles are
+  # still supported, but they intentionally build with network disabled.
+  zip -qr "$DEMO_DIR/stub-engine.zip" . -x Dockerfile ./Dockerfile
 )
 
 echo "[2/8] building polished leaderboard board (web/dist)"
@@ -177,9 +202,9 @@ fi
 
 echo "[3/8] starting services"
 start_service submission-api services/submission-api env SUBMISSION_API_ADDR="$SUBMISSION_ADDR" SUBMISSION_ARTIFACT_ROOT="$DEMO_SUBMISSION_ROOT" SUBMISSION_INDEX_PATH="$DEMO_SUBMISSION_INDEX" go run .
-start_service sandbox-runner services/sandbox-runner env SANDBOX_RUNNER_ADDR="$SANDBOX_ADDR" SANDBOX_RUNNER_MODE=local SUBMISSION_ARTIFACT_ROOT="$DEMO_SUBMISSION_ROOT" go run .
+start_service sandbox-runner services/sandbox-runner env SANDBOX_RUNNER_ADDR="$SANDBOX_ADDR" SANDBOX_RUNNER_MODE="$SANDBOX_MODE" SUBMISSION_ARTIFACT_ROOT="$DEMO_SUBMISSION_ROOT" go run .
 start_service leaderboard-api services/leaderboard-api env LEADERBOARD_API_ADDR="$LEADERBOARD_ADDR" LEADERBOARD_STORE_PATH="$DEMO_LEADERBOARD_STORE" go run .
-start_service orchestrator services/orchestrator env ORCHESTRATOR_ADDR="$ORCH_ADDR" ORCHESTRATOR_AUTO_START=false ORCHESTRATOR_STORE_PATH="$DEMO_SUBMISSION_INDEX" SANDBOX_RUNNER_URL="$SANDBOX_URL" LEADERBOARD_URL="$LEADERBOARD_URL" go run .
+start_service orchestrator services/orchestrator env ORCHESTRATOR_ADDR="$ORCH_ADDR" ORCHESTRATOR_AUTO_START=false ORCHESTRATOR_RUN_TIMEOUT="$RUN_TIMEOUT" ORCHESTRATOR_STORE_PATH="$DEMO_SUBMISSION_INDEX" SANDBOX_RUNNER_URL="$SANDBOX_URL" LEADERBOARD_URL="$LEADERBOARD_URL" go run .
 
 wait_health submission-api "$SUBMISSION_URL"
 wait_health sandbox-runner "$SANDBOX_URL"
@@ -206,7 +231,7 @@ echo "run_id=$RUN_ID"
 orchestrator_curl -X POST "$ORCH_URL/runs/$RUN_ID/start" >/dev/null
 
 echo "[6/8] waiting for orchestrator to finish"
-for _ in {1..120}; do
+for ((i = 0; i < RUN_WAIT_SECONDS; i++)); do
   orchestrator_curl "$ORCH_URL/runs/$RUN_ID" > "$DEMO_DIR/run-final.json"
   STATUS="$(json_get "$DEMO_DIR/run-final.json" status)"
   echo "status=$STATUS"
@@ -284,6 +309,9 @@ echo "==============================================================="
 echo " upload -> build -> benchmark -> score -> live leaderboard  ✓"
 echo "==============================================================="
 echo " run_id:               $RUN_ID"
+echo " sandbox mode:         $SANDBOX_MODE"
+echo " run timeout:          $RUN_TIMEOUT"
+echo " wait budget:          ${RUN_WAIT_SECONDS}s"
 echo " platform demo files:  $DEMO_DIR"
 echo " service logs:         $DEMO_DIR/*.log"
 echo

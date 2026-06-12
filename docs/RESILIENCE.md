@@ -19,7 +19,7 @@ as such — we would rather under-claim than overclaim.
 | Kafka/Redpanda broker unavailable (live telemetry) | `KafkaSink`'s dedicated producer task sees `send_result` enqueue errors (local queue full at `queue.buffering.max.messages=200000`) or failed delivery reports, which it consumes **out-of-band** in batches (`sink_kafka.rs`); `emit()` itself is a non-blocking channel send, so a slow broker never stalls the bot loop | Enqueue/delivery failures are **counted and reported at flush/teardown** (`[kafka-sink] delivery_errors=… enqueue_errors=…`) instead of failing the load test, so a broker outage degrades telemetry observably rather than killing the run — the WS order path and the local `events.jsonl`/`contestant_outputs.jsonl` (the validator's inputs) are unaffected. When the 200k-message buffer fills, librdkafka applies backpressure / drops per its queue policy. | Live metrics/leaderboard freshness only. Correctness and the file-based scoring path still work, because the validator reads the JSONL artifacts, not Kafka. |
 | Ingester lag / backpressure | Bounded `mpsc::channel(16_384)` between source and aggregator (`telemetry-ingester/main.rs`); consumer group lag observable on the broker | The Kafka source `tx.send(evt).await` **awaits** when the channel is full, which stops `consumer.recv()` and lets consumer-group lag build instead of dropping events (backpressure, not loss). Adding ingester replicas up to the partition count drains lag. | Live aggregate latency only. No data loss in the channel; events wait in Kafka. |
 | Redis unavailable | `sink::redis::spawn` returns `Err` at startup → logged and the sink is set to `None` (`telemetry-ingester/main.rs`); live score publish wrapped in best-effort `if let Err(...)` (`score-engine`); the leaderboard-api poller's `lastRefresh` stops advancing (`redisboard.go`) | The ingester continues with Redis disabled; the score-engine logs `redis leaderboard publish failed` and **does not fail the run** (local `score.json` is the source of truth). The leaderboard-api keeps **serving the last good snapshot** but flips its dependency-aware `/ready` probe to **503** once the data is older than 3 poll intervals (while `/health`, liveness, stays 200) and stamps `X-Leaderboard-Age-Ms` on `/leaderboard` — so k8s pulls the pod from the LB and clients can see the staleness instead of trusting frozen data as live. Redis live state is rebuildable from Timescale ([BLUEPRINT.md](BLUEPRINT.md) §4). | Live leaderboard/scorecard freshness only — and now *observable*, not silent. Runs still complete, score, and persist. |
-| Malicious / runaway submission | Container resource caps + correctness gate (`docker_runner.go`, validator) | Contained at the cgroup boundary (mem cap + swap off, `PidsLimit=512`, `nofile=4096`, `CapDrop: ALL`, `no-new-privileges`, read-only rootfs, default-deny egress — see §4). A submission that is fast but wrong is caught by the validator and scored **0** (§5). CPU/wallclock are bounded by the engine's `NanoCPUs` quota and the orchestrator `runTimeout`. | The submission's own container. No host descriptor/process exhaustion, no egress to other contestants or the internet. |
+| Malicious / runaway submission | Container resource caps + correctness gate (`docker_runner.go`, validator) | Contained at the cgroup boundary (mem cap + swap off, `PidsLimit=512`, `nofile=4096`, `CapDrop: ALL`, `no-new-privileges`, read-only rootfs; Docker DNS black-hole locally, K8s NetworkPolicy for hard egress denial — see §4). A submission that is fast but wrong is caught by the validator and scored **0** (§5). CPU/wallclock are bounded by the engine's `NanoCPUs` quota and the orchestrator `runTimeout`. | The submission's own container. No host descriptor/process exhaustion; hard no-egress is the K8s path. |
 
 The orchestrator FSM is `QUEUED → BUILDING → SANDBOX_STARTING → HEALTHCHECKING →
 BENCHMARKING → VALIDATING → SCORING → FINISHED` (`model.go`). **Note (honesty):**
@@ -95,16 +95,18 @@ Every contestant container is created with (`docker_runner.go`, matching
 - `NanoCPUs` quota + optional `CpusetCpus` pinning (fairness + reproducible
   latency), and a pluggable OCI runtime via `SANDBOX_DOCKER_RUNTIME` (e.g.
   gVisor `runsc`).
-- Network **default-deny**: the port is published bound to `127.0.0.1` only, and
-  with `network_egress=false` DNS is black-holed (`DNS: ["127.0.0.1"]`). In
-  Kubernetes this is enforced by a per-cell `NetworkPolicy` (`infra/k8s`) so the
-  pod is reachable **only** by the bot fleet on `:8080` with no internet or
-  cross-contestant egress.
+- Network isolation: Docker publishes the engine port bound to `127.0.0.1` only,
+  and with `network_egress=false` DNS is black-holed
+  (`DNS: ["127.0.0.1"]`). In Kubernetes this is enforced by a per-cell
+  `NetworkPolicy` (`infra/k8s`) so the pod is reachable **only** by the bot fleet
+  on `:8080` with no internet or cross-contestant egress.
 - `AutoRemove: true` + force-remove on stop, with bounded build (10 min) and
-  start (30 s) context timeouts so a stuck container is always reaped.
+  start (2 min) context timeouts so a stuck container is always reaped.
 
 The blast radius of any one submission is therefore its own cgroup/netns: it
-cannot starve the host, reach the network, or touch another contestant.
+cannot starve the host or touch another contestant. Full network egress denial is
+provided by the K8s NetworkPolicy path; local Docker mode blocks DNS-based
+egress while keeping the host-driven benchmark reachable.
 
 ## 5. Correctness gate — fast-but-wrong scores 0
 

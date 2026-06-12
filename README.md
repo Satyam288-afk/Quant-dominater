@@ -240,10 +240,10 @@ $(cd infra/terraform && tofu output -raw configure_kubectl)
 kubectl apply -k infra/k8s                          # the benchmark cell
 ```
 
-In Docker mode, `network_egress=false` creates a per-sandbox internal Docker
-bridge network. The engine is still reachable by the local bot fleet through a
-random localhost port, but the contestant container does not get normal outbound
-internet access.
+In Docker mode, engines run on the host-reachable Docker bridge and are exposed
+only through a random `127.0.0.1` port for the local bot fleet. When
+`network_egress=false`, DNS is black-holed inside the container; hard no-egress
+is enforced by the Kubernetes NetworkPolicy path.
 
 ## Run The Upload-To-Leaderboard Demo
 
@@ -251,6 +251,14 @@ This starts the local submission API, sandbox runner, orchestrator, and leaderbo
 
 ```bash
 ./scripts/run-platform-demo.sh
+```
+
+The script defaults to `SANDBOX_RUNNER_MODE=docker`, so the evidence path is
+upload → Docker image build → hardened container → benchmark → score. For a
+fast Go-only dev loop without Docker, run:
+
+```bash
+SANDBOX_RUNNER_MODE=local ./scripts/run-platform-demo.sh
 ```
 
 Keep the demo services running after the run if you want to open the live UI:
