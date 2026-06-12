@@ -1,7 +1,9 @@
-# Experimental control-plane manifest, intentionally not included by the base
-# kustomization. The Go sandbox-runner currently supports local and Docker modes;
-# a production Kubernetes mode still needs a real object-store artifact path and
-# an image builder/pusher before this Deployment should be scaled above zero.
+# Sandbox runner: builds contestant images and launches sandboxes. The shipped
+# runner runs in "docker" mode (the proven isolation boundary). The cloud-native
+# design — where the sandbox boundary is a Pod in iicpc-sandbox (see
+# 40-sandbox-pod-template) created via the scoped sandbox-orchestrator
+# ServiceAccount (never Docker-in-Docker), with builds through a rootless
+# BuildKit (kaniko/buildkitd) — is a documented next step; see infra/k8s/README.md.
 apiVersion: v1
 kind: Service
 metadata:
@@ -19,7 +21,7 @@ metadata:
   name: sandbox-runner
   namespace: iicpc
 spec:
-  replicas: 0
+  replicas: 1
   selector: { matchLabels: { app: sandbox-runner } }
   template:
     metadata:
@@ -31,6 +33,9 @@ spec:
           image: ghcr.io/iicpc/sandbox-runner:latest
           env:
             - { name: SANDBOX_RUNNER_ADDR, value: ":9200" }
+            # The shipped runner supports "local" and "docker"; "kubernetes" is a
+            # documented next step (the orchestrator would apply the
+            # 40-sandbox-pod-template per run via the scoped SA). See infra/k8s/README.md.
             - { name: SANDBOX_RUNNER_MODE, value: "docker" }
             - { name: SANDBOX_NAMESPACE, value: "iicpc-sandbox" }
             - { name: REPO_ROOT, value: "/data" }

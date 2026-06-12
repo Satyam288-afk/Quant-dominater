@@ -1,31 +1,44 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::hash::{BuildHasherDefault, Hasher};
+use std::sync::Arc;
 
 use bench_core::metrics::histogram::LatencyHistogram;
 use bench_core::metrics::TpsCounter;
 use bench_core::telemetry::{EventKind, TelemetryEvent};
 use serde::Serialize;
 
+/// Cap on the active dedup generation. Kafka auto-commit (`enable.auto.commit`
+/// plus the ~5s commit interval) means a restart only re-delivers the small
+/// window of events processed since the last commit; the two-generation
+/// rotation keeps at least that many recent identities live, so a re-delivery
+/// is still recognised. Sized generously (a few seconds of peak ingest) while
+/// bounding memory to O(window) instead of O(uptime) — the previous unbounded
+/// set grew for the pod's whole lifetime and OOM'd against the 1Gi limit on a
+/// persistent consumer.
+const DEDUP_WINDOW: usize = 262_144;
+
 /// Per-(run_id) aggregate. Within a run we track per-bot percentiles so
 /// downstream consumers can drill in, plus a roll-up across all bots.
 struct RunState {
-    bots: HashMap<String, BotState>,
+    bots: HashMap<Arc<str>, BotState>,
     first_ts_ns: u64,
     last_ts_ns: u64,
     /// 1-second ack buckets across the whole run, for peak (max) TPS.
     tps_counter: TpsCounter,
-    /// Identity hashes of every event already counted for this run. Telemetry
-    /// is delivered at-least-once (Kafka auto-commit + `earliest`), so after an
-    /// ingester crash the broker re-delivers events; without this set a
-    /// re-delivered ack would double-count `peak_tps` and inflate the percentile
-    /// sample set that feeds the live leaderboard. Deduping here makes the
-    /// aggregate idempotent under re-delivery. Bounded by the run's event count
-    /// (cleared when the run is finalized). The set's keys are already uniform
-    /// 64-bit hashes, so its hasher is a pass-through: SipHashing them a second
-    /// time was measured at ~half the dedup cost (the full fix — ahash identity
-    /// + identity set — took the path from 10.6-11.0 to 29.0-29.5 Mevents/s;
-    /// either half alone gives only ~1.4x).
-    seen: HashSet<u64, BuildHasherDefault<IdentityHasher>>,
+    /// Identity hashes of recently-counted events for this run. Telemetry is
+    /// delivered at-least-once (Kafka auto-commit + `earliest`), so after an
+    /// ingester crash the broker re-delivers the uncommitted window; without
+    /// this a re-delivered ack would double-count `peak_tps` and inflate the
+    /// percentile sample set that feeds the live leaderboard. Deduping here
+    /// makes the aggregate idempotent under re-delivery. Bounded to a rolling
+    /// window (see `WindowedDedup`) so a persistent consumer can't grow it
+    /// without limit. The keys are already uniform 64-bit hashes, so the set's
+    /// hasher is a pass-through: SipHashing them a second time was measured at
+    /// ~half the dedup cost (the full fix — ahash identity + identity set —
+    /// took the path from 10.6-11.0 to 29.0-29.5 Mevents/s; either half alone
+    /// gives only ~1.4x).
+    seen: WindowedDedup,
     /// Keyed hasher for event identities, fixed for the run's lifetime so a
     /// re-delivered event always collides with its first delivery.
     identity: ahash::RandomState,
@@ -43,10 +56,51 @@ impl RunState {
             // Window large enough to retain every 1s bucket of any realistic
             // benchmark run, so peak_tps() is the true per-second maximum.
             tps_counter: TpsCounter::new(4096),
-            seen: HashSet::default(),
+            seen: WindowedDedup::new(DEDUP_WINDOW),
             identity: ahash::RandomState::new(),
             duplicates_dropped: 0,
         }
+    }
+}
+
+type IdentitySet = HashSet<u64, BuildHasherDefault<IdentityHasher>>;
+
+/// Bounded, two-generation dedup over event identity hashes. Reads consult both
+/// the `active` and the previous `aged` generation; writes only ever land in
+/// `active`. When `active` fills to `cap`, it rotates into `aged` (dropping the
+/// older `aged`) and a fresh `active` starts. This keeps memory at O(cap) for
+/// the pod's whole uptime while still recognising any identity seen within the
+/// last one-to-two generations — comfortably covering Kafka's small
+/// auto-commit replay window, so re-delivered events are not double-counted.
+struct WindowedDedup {
+    active: IdentitySet,
+    aged: IdentitySet,
+    cap: usize,
+}
+
+impl WindowedDedup {
+    fn new(cap: usize) -> Self {
+        Self {
+            active: IdentitySet::default(),
+            aged: IdentitySet::default(),
+            cap: cap.max(1),
+        }
+    }
+
+    /// Returns true if `id` was newly inserted, false if it was already present
+    /// in either generation (a re-delivery within the window).
+    fn insert(&mut self, id: u64) -> bool {
+        if self.active.contains(&id) || self.aged.contains(&id) {
+            return false;
+        }
+        if self.active.len() >= self.cap {
+            // Rotate: the current active becomes the aged generation (the old
+            // aged is dropped), bounding total retained identities to ~2*cap.
+            std::mem::swap(&mut self.active, &mut self.aged);
+            self.active.clear();
+        }
+        self.active.insert(id);
+        true
     }
 }
 
@@ -119,9 +173,35 @@ impl Default for BotState {
     }
 }
 
+/// String interner mapping run_id/bot_id text to a shared `Arc<str>`. A hit is
+/// a clone of the Arc (one atomic increment) instead of a heap allocation +
+/// byte copy, which is the per-event cost the old `event.run_id.clone()` /
+/// `event.bot_id.clone()` map keys paid on every single event.
+#[derive(Default)]
+struct Interner {
+    table: HashMap<Box<str>, Arc<str>>,
+}
+
+impl Interner {
+    fn intern(&mut self, s: &str) -> Arc<str> {
+        if let Some(existing) = self.table.get(s) {
+            return existing.clone();
+        }
+        let arc: Arc<str> = Arc::from(s);
+        self.table.insert(Box::from(s), arc.clone());
+        arc
+    }
+}
+
 pub struct Aggregator {
-    runs: HashMap<String, RunState>,
+    runs: HashMap<Arc<str>, RunState>,
     filter: Option<String>,
+    /// Interns run_id/bot_id strings into shared `Arc<str>` so the per-event
+    /// map keys are a refcount bump, not a fresh String allocation+copy on
+    /// every event. On a steady stream the run/bot cardinality is tiny relative
+    /// to event count, so the interner stays small and the clone is amortised
+    /// away.
+    interner: Interner,
 }
 
 impl Aggregator {
@@ -129,6 +209,7 @@ impl Aggregator {
         Self {
             runs: HashMap::new(),
             filter,
+            interner: Interner::default(),
         }
     }
 
@@ -138,9 +219,10 @@ impl Aggregator {
                 return;
             }
         }
+        let run_key = self.interner.intern(&event.run_id);
         let run = self
             .runs
-            .entry(event.run_id.clone())
+            .entry(run_key)
             .or_insert_with(RunState::new);
         // Idempotency gate: drop at-least-once re-deliveries so they can't
         // double-count peak_tps or inflate the percentile sample set.
@@ -170,7 +252,8 @@ impl Aggregator {
         if event.recv_ts_ns > 0 && matches!(event.event_type, EventKind::AckReceived) {
             run.tps_counter.record(event.recv_ts_ns);
         }
-        let bot = run.bots.entry(event.bot_id.clone()).or_default();
+        let bot_key = self.interner.intern(&event.bot_id);
+        let bot = run.bots.entry(bot_key).or_default();
         match event.event_type {
             EventKind::OrderSent => bot.orders_sent += 1,
             EventKind::AckReceived => {
@@ -207,7 +290,7 @@ impl Aggregator {
                 totals.errors += b.errors;
                 totals.histogram_count += b.histogram.count();
                 bots.push(BotSummary {
-                    bot_id,
+                    bot_id: bot_id.to_string(),
                     orders_sent: b.orders_sent,
                     acks_received: b.acks_received,
                     fills_received: b.fills_received,
@@ -228,7 +311,7 @@ impl Aggregator {
             let (p50, p90, p99, p999) = approx_global_percentiles(&bots);
 
             runs.push(RunAggregate {
-                run_id,
+                run_id: run_id.to_string(),
                 duration_secs,
                 orders_sent: totals.orders_sent,
                 acks_received: totals.acks_received,
@@ -401,5 +484,57 @@ mod tests {
         let r = &summary.runs[0];
         assert_eq!(r.fills_received, 2);
         assert_eq!(r.duplicates_dropped, 0);
+    }
+
+    #[test]
+    fn windowed_dedup_recognizes_within_window_and_bounds_memory() {
+        // cap=4 -> the active generation holds up to 4 ids, with one aged
+        // generation behind it, so anything seen within the last ~cap..2*cap
+        // inserts is still recognised. Memory never exceeds 2*cap regardless of
+        // how many distinct ids stream through.
+        let mut dedup = WindowedDedup::new(4);
+        assert!(dedup.insert(1)); // new
+        assert!(!dedup.insert(1)); // immediate re-delivery -> duplicate
+        for id in 2..=4 {
+            assert!(dedup.insert(id));
+        }
+        // active is now full {1,2,3,4}; the next insert rotates it into `aged`
+        // and starts a fresh active. id 1 is still in `aged`, so still a dup.
+        assert!(dedup.insert(5)); // triggers rotation, lands in fresh active
+        assert!(!dedup.insert(1)); // recognised via the aged generation
+        assert!(!dedup.insert(5)); // recognised via the active generation
+        // Push enough distinct ids to rotate twice; the original window ages
+        // out and total retained ids stay bounded by ~2*cap.
+        for id in 100..200 {
+            dedup.insert(id);
+        }
+        assert!(dedup.active.len() <= 4);
+        assert!(dedup.aged.len() <= 4);
+        // id 1 has now aged past both live generations: treated as new again.
+        // This is the bounded-window trade-off — correct because Kafka only
+        // re-delivers the small uncommitted window, never the whole run.
+        assert!(dedup.insert(1));
+    }
+
+    #[test]
+    fn dedups_across_many_distinct_events_within_window() {
+        // End-to-end: interleave a re-delivered ack with a stream of distinct
+        // events. As long as the re-delivery falls inside the dedup window
+        // (it does here — far fewer than DEDUP_WINDOW events) it is dropped,
+        // so peak_tps and ack counts stay idempotent.
+        let mut agg = Aggregator::new(None);
+        let ack = evt("r1", "b1", EventKind::AckReceived, 1_000_000);
+        agg.record(&ack);
+        for i in 0..1_000u64 {
+            let mut fill = evt("r1", "b1", EventKind::FillReceived, 0);
+            fill.recv_ts_ns = 10_000 + i; // each distinct
+            agg.record(&fill);
+        }
+        agg.record(&ack); // re-delivery still within the window
+        let summary = agg.finalize();
+        let r = &summary.runs[0];
+        assert_eq!(r.acks_received, 1);
+        assert_eq!(r.fills_received, 1_000);
+        assert_eq!(r.duplicates_dropped, 1);
     }
 }

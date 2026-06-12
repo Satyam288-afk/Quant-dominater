@@ -18,6 +18,11 @@ type LocalRunner struct {
 	repoRoot string
 	runRoot  string
 
+	// sem bounds concurrent compiles + process starts so a burst of requests
+	// queues instead of forking unlimited concurrent builds on a single host.
+	// See newBuildSem.
+	sem chan struct{}
+
 	mu        sync.Mutex
 	images    map[string]*localImage
 	sandboxes map[string]*localSandbox
@@ -42,6 +47,7 @@ func NewLocalRunner(repoRoot string, runRoot string) *LocalRunner {
 	return &LocalRunner{
 		repoRoot:  repoRoot,
 		runRoot:   runRoot,
+		sem:       newBuildSem(),
 		images:    make(map[string]*localImage),
 		sandboxes: make(map[string]*localSandbox),
 	}
@@ -61,6 +67,12 @@ func (r *LocalRunner) Build(ctx context.Context, req BuildRequest) (ImageRef, er
 		return ImageRef{}, fmt.Errorf("local runner only supports go artifacts, got %q", req.Language)
 	}
 
+	// Acquire a build slot before the heavy work (go mod tidy + go build);
+	// blocks here so a burst queues instead of forking unlimited concurrent
+	// compiles. Released when Build returns, on every path.
+	r.sem <- struct{}{}
+	defer func() { <-r.sem }()
+
 	artifactPath, err := resolveLocalArtifact(r.repoRoot, req.ArtifactURI)
 	if err != nil {
 		return ImageRef{}, err
@@ -68,7 +80,7 @@ func (r *LocalRunner) Build(ctx context.Context, req BuildRequest) (ImageRef, er
 
 	buildID := fmt.Sprintf("%s_%d", sanitizeDockerTag(req.SubmissionID), time.Now().UnixNano())
 	buildDir := filepath.Join(r.runRoot, "builds", buildID)
-	if err := prepareBuildContext(artifactPath, buildDir, req.Language); err != nil {
+	if _, err := prepareBuildContext(artifactPath, buildDir, req.Language); err != nil {
 		return ImageRef{}, err
 	}
 
@@ -166,6 +178,12 @@ func (r *LocalRunner) Start(ctx context.Context, req StartRequest) (SandboxHandl
 	if image == nil {
 		return SandboxHandle{}, fmt.Errorf("unknown image_ref %q; build it first", req.ImageRef)
 	}
+
+	// Acquire a slot before spawning the engine process so a burst queues
+	// instead of forking unlimited concurrent processes. Released when Start
+	// returns, on every path.
+	r.sem <- struct{}{}
+	defer func() { <-r.sem }()
 
 	port, err := freePort()
 	if err != nil {

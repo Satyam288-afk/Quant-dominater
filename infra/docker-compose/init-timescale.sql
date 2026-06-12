@@ -4,7 +4,9 @@
 
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
--- Raw per-event telemetry (downsampled aggressively).
+-- Raw per-event telemetry. The high-cardinality source of truth for scoring;
+-- aggressively compressed + aged out (see policies below) so the volume the
+-- score-engine percentile-sorts stays bounded.
 CREATE TABLE IF NOT EXISTS metrics_raw (
   time            TIMESTAMPTZ      NOT NULL,
   run_id          TEXT             NOT NULL,
@@ -21,28 +23,40 @@ SELECT create_hypertable('metrics_raw', 'time',
                          if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS metrics_raw_run_time
   ON metrics_raw (run_id, time DESC);
+-- Supports the score-engine percentile sort (ORDER BY latency_ns per run_id).
+CREATE INDEX IF NOT EXISTS metrics_raw_run_latency
+  ON metrics_raw (run_id, latency_ns);
 
--- 1-second per-bot aggregates written by the ingester.
-CREATE TABLE IF NOT EXISTS metrics_1s (
-  time            TIMESTAMPTZ      NOT NULL,
-  run_id          TEXT             NOT NULL,
-  bot_id          TEXT             NOT NULL,
-  orders_sent     BIGINT           NOT NULL,
-  acks_received   BIGINT           NOT NULL,
-  fills_received  BIGINT           NOT NULL,
-  timeouts        BIGINT           NOT NULL,
-  errors          BIGINT           NOT NULL,
-  p50_ns          BIGINT,
-  p90_ns          BIGINT,
-  p99_ns          BIGINT,
-  p999_ns         BIGINT,
-  tps             DOUBLE PRECISION
-);
-SELECT create_hypertable('metrics_1s', 'time',
-                         chunk_time_interval => INTERVAL '1 hour',
-                         if_not_exists => TRUE);
-CREATE INDEX IF NOT EXISTS metrics_1s_run_bot_time
-  ON metrics_1s (run_id, bot_id, time DESC);
+-- Retention + compression keep the PVC from filling: segment by run_id so each
+-- run's chunks compress as a unit, compress chunks older than an hour, and drop
+-- raw telemetry after a day (scores/aggregates outlive it). Policy adds are
+-- idempotent via if_not_exists so re-running this init script is safe.
+ALTER TABLE metrics_raw SET (timescaledb.compress,
+                             timescaledb.compress_segmentby = 'run_id');
+SELECT add_compression_policy('metrics_raw', INTERVAL '1 hour', if_not_exists => TRUE);
+SELECT add_retention_policy('metrics_raw', INTERVAL '1 day', if_not_exists => TRUE);
+
+-- 1-second aggregates, Timescale-native: a continuous aggregate over metrics_raw
+-- (no separate writer). Refreshed on a schedule below; this is what makes "data
+-- is downsampled aggressively" actually true.
+CREATE MATERIALIZED VIEW IF NOT EXISTS metrics_1s
+WITH (timescaledb.continuous) AS
+SELECT time_bucket('1 second', time) AS bucket,
+       run_id,
+       count(*)        AS samples,
+       avg(latency_ns) AS avg_latency_ns,
+       min(latency_ns) AS min_latency_ns,
+       max(latency_ns) AS max_latency_ns
+FROM metrics_raw
+GROUP BY bucket, run_id
+WITH NO DATA;
+-- Keep the rollup current: materialize buckets from a day ago up to a minute ago
+-- (the open bucket is left to the next refresh), every 30s.
+SELECT add_continuous_aggregate_policy('metrics_1s',
+                                       start_offset => INTERVAL '1 day',
+                                       end_offset   => INTERVAL '1 minute',
+                                       schedule_interval => INTERVAL '30 seconds',
+                                       if_not_exists => TRUE);
 
 -- Resource samples (CPU / mem from sandbox runner, future hookup).
 CREATE TABLE IF NOT EXISTS run_resource (
@@ -55,6 +69,8 @@ CREATE TABLE IF NOT EXISTS run_resource (
 SELECT create_hypertable('run_resource', 'time',
                          chunk_time_interval => INTERVAL '5 minutes',
                          if_not_exists => TRUE);
+-- Same bounded-retention story as metrics_raw so this PVC can't fill either.
+SELECT add_retention_policy('run_resource', INTERVAL '1 day', if_not_exists => TRUE);
 
 -- Final scores. Read by leaderboard-api.
 CREATE TABLE IF NOT EXISTS scores (

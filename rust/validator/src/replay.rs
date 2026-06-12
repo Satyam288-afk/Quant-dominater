@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use rayon::prelude::*;
@@ -224,7 +225,7 @@ pub fn replay_expected_fills(events: &[Event], shards: usize) -> Vec<Fill> {
 /// which keeps the ack-less fixtures and the cancel path byte-identical.
 pub fn order_by_engine_seq(
     mut events: Vec<Event>,
-    accept_seq: &HashMap<String, u64>,
+    accept_seq: &HashMap<Arc<str>, u64>,
 ) -> Vec<Event> {
     if accept_seq.is_empty() {
         return events;
@@ -243,7 +244,8 @@ pub fn order_by_engine_seq(
         if id.is_empty() {
             return None;
         }
-        accept_seq.get(id).copied()
+        // Arc<str>: Borrow<str>, so look up the interned key by &str.
+        accept_seq.get(id.as_str()).copied()
     };
     if !events.iter().all(|ev| arrival_key(ev).is_some()) {
         return events;
@@ -325,10 +327,10 @@ mod tests {
 
         // Reorder by the engine's accepted sequence (from ack engine_seq), then
         // replay — now it pairs C, exactly what the engine produced.
-        let accept = HashMap::from([
-            ("A_sell".to_string(), 1u64),
-            ("C_buy".to_string(), 2u64),
-            ("B_buy".to_string(), 3u64),
+        let accept: HashMap<Arc<str>, u64> = HashMap::from([
+            (Arc::from("A_sell"), 1u64),
+            (Arc::from("C_buy"), 2u64),
+            (Arc::from("B_buy"), 3u64),
         ]);
         let engine_order = order_by_engine_seq(send_order, &accept);
         let engine_fills = replay_expected_fills(&engine_order, 1);
@@ -360,12 +362,12 @@ mod tests {
             ev_new(4, "A", "c", Side::Buy, 100, 5, 4),
             ev_new(5, "A", "d", Side::Sell, 90, 5, 5),
         ];
-        let arrival = HashMap::from([
-            ("a".to_string(), 1u64),
-            ("b".to_string(), 2),
-            ("ca".to_string(), 3),
-            ("c".to_string(), 4),
-            ("d".to_string(), 5),
+        let arrival: HashMap<Arc<str>, u64> = HashMap::from([
+            (Arc::from("a"), 1u64),
+            (Arc::from("b"), 2),
+            (Arc::from("ca"), 3),
+            (Arc::from("c"), 4),
+            (Arc::from("d"), 5),
         ]);
         let ordered = order_by_engine_seq(events, &arrival);
         let fills = replay_expected_fills(&ordered, 1);

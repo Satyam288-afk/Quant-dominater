@@ -18,7 +18,7 @@ var ErrNotFound = errors.New("record not found")
 
 type JSONStore struct {
 	path string
-	mu   sync.Mutex
+	mu   sync.RWMutex
 }
 
 type snapshot struct {
@@ -31,8 +31,8 @@ func NewJSONStore(path string) *JSONStore {
 }
 
 func (s *JSONStore) GetSubmission(_ context.Context, submissionID string) (*model.Submission, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	snap, err := s.loadLocked()
 	if err != nil {
@@ -48,8 +48,8 @@ func (s *JSONStore) GetSubmission(_ context.Context, submissionID string) (*mode
 }
 
 func (s *JSONStore) GetRun(_ context.Context, runID string) (*model.BenchmarkRun, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	snap, err := s.loadLocked()
 	if err != nil {
@@ -64,8 +64,8 @@ func (s *JSONStore) GetRun(_ context.Context, runID string) (*model.BenchmarkRun
 }
 
 func (s *JSONStore) ListRuns(_ context.Context) ([]*model.BenchmarkRun, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	snap, err := s.loadLocked()
 	if err != nil {
@@ -84,6 +84,11 @@ func (s *JSONStore) ListRuns(_ context.Context) ([]*model.BenchmarkRun, error) {
 func (s *JSONStore) SaveRun(_ context.Context, run *model.BenchmarkRun) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	lock, err := acquireFileLock(s.path, true)
+	if err != nil {
+		return err
+	}
+	defer lock.release()
 
 	snap, err := s.loadLocked()
 	if err != nil {
@@ -101,6 +106,11 @@ func (s *JSONStore) SaveRun(_ context.Context, run *model.BenchmarkRun) error {
 func (s *JSONStore) ClaimRun(_ context.Context, runID string) (*model.BenchmarkRun, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	lock, err := acquireFileLock(s.path, true)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.release()
 
 	snap, err := s.loadLocked()
 	if err != nil {
@@ -128,6 +138,11 @@ func (s *JSONStore) ClaimRun(_ context.Context, runID string) (*model.BenchmarkR
 func (s *JSONStore) ClaimNextQueuedRun(_ context.Context) (*model.BenchmarkRun, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	lock, err := acquireFileLock(s.path, true)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.release()
 
 	snap, err := s.loadLocked()
 	if err != nil {
@@ -170,18 +185,19 @@ func (s *JSONStore) writeLocked(snap *snapshot) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}
-	sort.Slice(snap.Submissions, func(i, j int) bool {
-		return snap.Submissions[i].CreatedAt.After(snap.Submissions[j].CreatedAt)
-	})
-	sort.Slice(snap.Runs, func(i, j int) bool {
-		return snap.Runs[i].CreatedAt.After(snap.Runs[j].CreatedAt)
-	})
+	// No write-side sort: every reader (ListRuns / ListSubmissions /
+	// ClaimNextQueuedRun) already orders by CreatedAt, so sorting the whole
+	// snapshot on every write is pure O(n log n) waste that grows the
+	// lock-hold time with total run history.
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	tmp := s.path + ".tmp"
+	// Per-process tmp name: the orchestrator and submission-api both write this
+	// index.json, and a shared "<path>.tmp" would let their renames clobber
+	// each other's in-flight temp file even under the cross-process flock.
+	tmp := fmt.Sprintf("%s.%d.tmp", s.path, os.Getpid())
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return err
 	}

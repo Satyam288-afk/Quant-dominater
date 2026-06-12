@@ -1,6 +1,12 @@
-.PHONY: proto-go test-go test-rust bot-fleet validator stub-engine rust-engine validate-fixture control-panel submission-api sandbox-runner orchestrator score-engine leaderboard-api console-api web web-build k8s-validate tf-validate iac-validate kind-validate live-demo chaos-demo platform-demo console-stack reset-demo-state
+.PHONY: proto-go test-go test-rust bot-fleet validator stub-engine rust-engine validate-fixture control-panel submission-api sandbox-runner orchestrator score-engine leaderboard-api console-api web web-build k8s-validate tf-validate iac-validate live-demo chaos-demo platform-demo console-stack reset-demo-state images demo kind-scale-proof
 
 PROTOC_GEN_GO ?= $(shell go env GOPATH)/bin/protoc-gen-go
+
+# Container registry the k8s manifests pull from (see infra/k8s/2*.yaml,30,31).
+# Override REGISTRY/IMAGE_TAG to push elsewhere, e.g.
+#   make images REGISTRY=<acct>.dkr.ecr.<region>.amazonaws.com/iicpc IMAGE_TAG=v1
+REGISTRY ?= ghcr.io/iicpc
+IMAGE_TAG ?= latest
 
 proto-go:
 	mkdir -p shared/go
@@ -74,12 +80,7 @@ chaos-demo:
 # IaC validation (no cloud creds / cluster required)
 k8s-validate:
 	kubectl kustomize infra/k8s | kubeconform -strict -summary -kubernetes-version 1.30.0
-	kubeconform -strict -summary -kubernetes-version 1.30.0 \
-		infra/k8s/20-submission-api.yaml \
-		infra/k8s/21-sandbox-runner.yaml \
-		infra/k8s/22-orchestrator.yaml \
-		infra/k8s/31-bot-fleet-job.yaml \
-		infra/k8s/40-sandbox-pod-template.yaml
+	kubeconform -strict -summary -kubernetes-version 1.30.0 infra/k8s/40-sandbox-pod-template.yaml infra/k8s/31-bot-fleet-job.yaml
 
 tf-validate:
 	cd infra/terraform && (command -v tofu >/dev/null && tofu fmt -check -recursive && tofu init -backend=false -input=false >/dev/null && tofu validate) || \
@@ -87,8 +88,29 @@ tf-validate:
 
 iac-validate: k8s-validate tf-validate
 
-kind-validate:
-	./scripts/validate-kind-data-plane.sh
+# Build + tag every platform service image the k8s manifests pull. Each builds
+# with the repo root as context (Rust crates resolve ../bench-core and the
+# proto/ tree; submission-api/orchestrator resolve their ../../shared/go replace)
+# and its own -f Dockerfile. Tags match infra/k8s exactly (REGISTRY/<svc>:TAG).
+# The Rust images build --features kafka/live to match the manifest comments.
+images:
+	docker build -f services/submission-api/Dockerfile     -t $(REGISTRY)/submission-api:$(IMAGE_TAG)     .
+	docker build -f services/sandbox-runner/Dockerfile      -t $(REGISTRY)/sandbox-runner:$(IMAGE_TAG)      .
+	docker build -f services/orchestrator/Dockerfile        -t $(REGISTRY)/orchestrator:$(IMAGE_TAG)        .
+	docker build -f services/leaderboard-api/Dockerfile     -t $(REGISTRY)/leaderboard-api:$(IMAGE_TAG)     .
+	docker build -f services/score-engine/Dockerfile        -t $(REGISTRY)/score-engine:$(IMAGE_TAG)        .
+	docker build -f services/console-api/Dockerfile         -t $(REGISTRY)/console-api:$(IMAGE_TAG)         .
+	docker build -f services/control-panel/Dockerfile       -t $(REGISTRY)/control-panel:$(IMAGE_TAG)       .
+	docker build -f rust/bot-fleet/Dockerfile               -t $(REGISTRY)/bot-fleet:$(IMAGE_TAG)           .
+	docker build -f rust/telemetry-ingester/Dockerfile      -t $(REGISTRY)/telemetry-ingester:$(IMAGE_TAG)  .
+
+# One-command platform walkthrough for the judges (maintained in scripts/).
+demo:
+	bash scripts/run-platform-demo.sh
+
+# Multi-node horizontal-scale proof on a local kind cluster (requires kind).
+kind-scale-proof:
+	bash scripts/run-kind-scale-proof.sh
 
 # Console (colleague's local benchmark console)
 console-api:

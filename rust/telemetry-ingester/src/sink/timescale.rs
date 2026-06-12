@@ -1,6 +1,9 @@
+use std::fmt::Write as _;
+
 use anyhow::{Context, Result};
 use bench_core::telemetry::{EventKind, TelemetryEvent};
 use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::postgres::PgPoolCopyExt;
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration, MissedTickBehavior};
 
@@ -57,49 +60,111 @@ async fn flush(pool: &PgPool, buf: &mut Vec<TelemetryEvent>) -> Result<()> {
     if buf.is_empty() {
         return Ok(());
     }
-    let mut query = String::from(
-        "INSERT INTO metrics_raw \
-         (time, run_id, bot_id, event_type, client_order_id, seq_no, latency_ns, send_ts_ns, recv_ts_ns) VALUES "
-    );
-    for i in 0..buf.len() {
-        if i > 0 {
-            query.push(',');
-        }
-        let base = i * 9;
-        query.push_str(&format!(
-            "(to_timestamp(${}::double precision / 1e9), ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
-            base + 1,
-            base + 2,
-            base + 3,
-            base + 4,
-            base + 5,
-            base + 6,
-            base + 7,
-            base + 8,
-            base + 9
-        ));
-    }
-    let mut q = sqlx::query(&query);
+    // Bulk-load via COPY ... FROM STDIN instead of a string-built multi-row
+    // INSERT. COPY skips the per-row parse/plan/bind overhead of INSERT, and
+    // we pre-render the `time` column to an ISO-8601 literal client-side so
+    // Postgres no longer evaluates `to_timestamp($n/1e9)` once per row — both
+    // cut server-side CPU on the ingest hot path. Column order matches the
+    // metrics_raw hypertable exactly. The batch is the COPY unit, mirroring
+    // the old INSERT's flush cadence.
+    let mut copy = pool
+        .copy_in_raw(
+            "COPY metrics_raw \
+             (time, run_id, bot_id, event_type, client_order_id, seq_no, latency_ns, send_ts_ns, recv_ts_ns) \
+             FROM STDIN WITH (FORMAT text)",
+        )
+        .await
+        .context("starting metrics_raw COPY")?;
+
+    let mut row = String::with_capacity(160);
     for e in buf.iter() {
         let ts_for_time = if e.recv_ts_ns > 0 {
             e.recv_ts_ns
         } else {
             e.send_ts_ns
         };
-        q = q
-            .bind(ts_for_time as f64)
-            .bind(&e.run_id)
-            .bind(&e.bot_id)
-            .bind(event_kind_str(e.event_type))
-            .bind(&e.client_order_id)
-            .bind(e.seq_no as i64)
-            .bind(e.latency_ns as i64)
-            .bind(e.send_ts_ns as i64)
-            .bind(e.recv_ts_ns as i64);
+        row.clear();
+        // Text COPY format: tab-separated columns, `\N` for NULL, terminated
+        // by a newline. Text fields are escaped so tabs/newlines/backslashes in
+        // an id can't corrupt the stream.
+        push_iso8601_utc(&mut row, ts_for_time);
+        row.push('\t');
+        push_escaped(&mut row, &e.run_id);
+        row.push('\t');
+        push_escaped(&mut row, &e.bot_id);
+        row.push('\t');
+        push_escaped(&mut row, event_kind_str(e.event_type));
+        row.push('\t');
+        push_escaped(&mut row, &e.client_order_id);
+        row.push('\t');
+        let _ = write!(row, "{}", e.seq_no as i64);
+        row.push('\t');
+        let _ = write!(row, "{}", e.latency_ns as i64);
+        row.push('\t');
+        let _ = write!(row, "{}", e.send_ts_ns as i64);
+        row.push('\t');
+        let _ = write!(row, "{}", e.recv_ts_ns as i64);
+        row.push('\n');
+        copy.send(row.as_bytes())
+            .await
+            .context("streaming metrics_raw COPY row")?;
     }
-    q.execute(pool).await?;
+    copy.finish().await.context("finishing metrics_raw COPY")?;
     buf.clear();
     Ok(())
+}
+
+/// Append `value` to `out` with COPY text-format escaping (backslash, tab,
+/// newline, carriage return). Other characters pass through unchanged.
+fn push_escaped(out: &mut String, value: &str) {
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            other => out.push(other),
+        }
+    }
+}
+
+/// Render an epoch-nanosecond timestamp as an ISO-8601 UTC literal that
+/// Postgres parses into TIMESTAMPTZ, e.g. `2024-01-02 03:04:05.123456+00`.
+/// Done client-side so the server never runs `to_timestamp()` per row.
+fn push_iso8601_utc(out: &mut String, ts_ns: u64) {
+    let secs = (ts_ns / 1_000_000_000) as i64;
+    let nanos = (ts_ns % 1_000_000_000) as u32;
+    let days = secs.div_euclid(86_400);
+    let secs_of_day = secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = secs_of_day / 3600;
+    let minute = (secs_of_day % 3600) / 60;
+    let second = secs_of_day % 60;
+    // Microsecond resolution: TIMESTAMPTZ stores microseconds, so emitting more
+    // would be silently truncated by Postgres anyway. Matches the precision the
+    // old `to_timestamp(ns/1e9)` path produced.
+    let micros = nanos / 1_000;
+    let _ = write!(
+        out,
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}+00",
+        year, month, day, hour, minute, second, micros
+    );
+}
+
+/// Convert a count of days since the Unix epoch (1970-01-01) into a civil
+/// `(year, month, day)`. Howard Hinnant's `civil_from_days` algorithm, valid
+/// across the full TIMESTAMPTZ range.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 fn event_kind_str(k: EventKind) -> &'static str {

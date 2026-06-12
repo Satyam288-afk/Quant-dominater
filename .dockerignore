@@ -1,19 +1,39 @@
-.git
-.github
-.artifacts
-.leaderboard
-.runs
-target
-web/node_modules
-web/dist
-web/tsconfig.tsbuildinfo
-telemetry.jsonl
-telemetry-summary.json
-events.jsonl
-contestant_outputs.jsonl
-validation.json
-score.json
-*.tfstate
-*.tfstate.*
-**/.terraform
+# Keep the Docker build context small. All service/crate Dockerfiles build with
+# the repo root as context (Rust crates resolve ../bench-core and ../../proto;
+# the two Go services with a `replace ../../shared/go` need shared/go), so this
+# prunes everything a build never needs — most importantly the multi-gigabyte
+# Cargo target/ and the .runs/ run artifacts.
+
+# Build outputs / caches
+target/
+**/target/
+.runs/
+.artifacts/
+.leaderboard/
+
+# VCS & local tooling
+.git/
+.gitignore
+.idea/
+.vscode/
+*.swp
+*.swo
 .DS_Store
+
+# Committed host binaries (images rebuild these from source)
+services/console-api/console-api
+examples/stub-engine/stub-engine
+
+# Web / Node (not needed by any service or crate image)
+web/node_modules/
+web/dist/
+
+# Docs / fixtures / IaC that no image build consumes
+docs/
+proj_context/
+*.pdf
+infra/terraform/**/.terraform/
+
+# Dockerfiles themselves
+**/Dockerfile
+.dockerignore

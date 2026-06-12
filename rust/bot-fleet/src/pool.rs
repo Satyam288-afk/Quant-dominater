@@ -13,6 +13,13 @@ use tokio_tungstenite::{connect_async_with_config, tungstenite::Message, MaybeTl
 /// Reconnect backoff: first retry after this long, doubling up to the cap.
 const RECONNECT_BASE_MS: u64 = 10;
 const RECONNECT_CAP_MS: u64 = 2_000;
+/// A socket that lives less than this before dying is treated as a *flap*, not
+/// a recovery: a hostile engine that accepts the WS upgrade and then instantly
+/// closes returns `Ok` from connect, so without this guard the supervisor would
+/// re-establish with zero delay, spin a tight reconnect storm (~thousands/sec,
+/// burning a core), and inflate the judge-facing `reconnects` counter. A flap
+/// is backed off exponentially and is NOT counted as a recovery.
+const RECONNECT_FLAP_MS: u64 = 500;
 
 /// One outgoing WebSocket per pool connection. `bots/N` virtual bots share
 /// each socket. Routing inbound messages back to a specific bot is done by
@@ -202,16 +209,19 @@ async fn supervise_connection(
 
     loop {
         // Acquire a live stream: reuse the initial socket, else reconnect.
-        let stream = match current.take() {
-            Some(s) => s,
+        // `is_reconnect` distinguishes a freshly dialled socket (whose recovery
+        // we may count, once it proves useful) from the initial one.
+        let (stream, is_reconnect) = match current.take() {
+            Some(s) => (s, false),
             None => match connect_async_with_config(target.as_str(), Some(ws_config()), false).await
             {
                 Ok((s, _)) => {
                     set_nodelay(&s);
-                    backoff = Duration::from_millis(RECONNECT_BASE_MS);
-                    let n = reconnects.fetch_add(1, Ordering::Relaxed) + 1;
-                    eprintln!("[pool] reconnected to {target} (recoveries={n})");
-                    s
+                    // Don't reset backoff or count a recovery yet: connect
+                    // returning Ok only means the upgrade was accepted, which a
+                    // flapping engine does on every attempt. Both happen below,
+                    // and only once the socket has proven useful.
+                    (s, true)
                 }
                 Err(err) => {
                     eprintln!(
@@ -225,6 +235,7 @@ async fn supervise_connection(
             },
         };
 
+        let live_since = Instant::now();
         let (mut write, mut read) = stream.split();
 
         // Reader subtask: owns the read half plus a death token. When the
@@ -287,11 +298,36 @@ async fn supervise_connection(
         };
 
         reader.abort();
+
+        // A socket that carried traffic for a meaningful interval was a real
+        // connection; one that died almost immediately was a flap (e.g. an
+        // accept-then-close engine).
+        let useful = live_since.elapsed() >= Duration::from_millis(RECONNECT_FLAP_MS);
+        if useful {
+            // Count the recovery exactly once, when a *reconnected* socket has
+            // proven useful — including the graceful run-end below, so a genuine
+            // outage+recovery still reports reconnects=1.
+            if is_reconnect {
+                let n = reconnects.fetch_add(1, Ordering::Relaxed) + 1;
+                eprintln!("[pool] recovered connection to {target} (recoveries={n})");
+            }
+            // Reset the backoff so the next genuine outage gets a fast retry.
+            backoff = Duration::from_millis(RECONNECT_BASE_MS);
+        }
+
         if graceful {
             return;
         }
+
+        if !useful {
+            // Flapping socket: back off before retrying so a hostile or broken
+            // engine can't drive a zero-delay reconnect storm. Not counted as a
+            // recovery (the count above is gated on `useful`).
+            sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_millis(RECONNECT_CAP_MS));
+        }
         eprintln!("[pool] connection to {target} lost; reconnecting with backoff");
-        // `current` is None -> the loop top reconnects with backoff.
+        // `current` is None -> the loop top reconnects.
     }
 }
 

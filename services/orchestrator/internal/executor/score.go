@@ -61,14 +61,32 @@ func writeScore(run *model.BenchmarkRun, score model.ScoreResult) (model.ScoreRe
 	return score, os.WriteFile(filepath.Join(run.ArtifactDir, "score.json"), data, 0o644)
 }
 
+// Latency curve bounds — full credit at/below the ~0.1ms in-contract floor,
+// zero at/above 50ms, log-scaled between (latency perception is logarithmic and
+// real engines cluster in the sub-5ms band, where the old flat `<=5ms -> 100`
+// rule tied every engine). Identical to the Rust scorer
+// (rust/bench-core/src/score/formula.rs) and the score-engine twin so all paths
+// agree.
+const (
+	latencyFloorMS = 0.1
+	latencyCapMS   = 50.0
+)
+
 func latencyScore(p99MS float64) float64 {
-	if p99MS <= 0 || p99MS <= 5 {
-		return 100
-	}
-	if p99MS >= 100 {
+	if p99MS <= 0 {
+		// No measured latency -> no credit, not the floor's 100 (which would
+		// silently turn a parse/measurement failure into a perfect score).
 		return 0
 	}
-	return round2(100 * (100 - p99MS) / 95)
+	if p99MS <= latencyFloorMS {
+		return 100
+	}
+	if p99MS >= latencyCapMS {
+		return 0
+	}
+	num := math.Log10(latencyCapMS) - math.Log10(p99MS)
+	den := math.Log10(latencyCapMS) - math.Log10(latencyFloorMS)
+	return round2(100 * num / den)
 }
 
 func throughputScore(tps float64, expected int) float64 {

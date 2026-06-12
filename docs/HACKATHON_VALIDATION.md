@@ -56,7 +56,7 @@ This demonstrates the interactive flow:
 upload ZIP -> create submission -> start run -> sandbox -> benchmark -> validate -> score -> artifacts
 ```
 
-## 3. Kubernetes Data-Plane Proof
+## 3. Kubernetes Horizontal-Scale Proof
 
 Prerequisites:
 
@@ -69,35 +69,35 @@ kubectl version --client
 Run:
 
 ```bash
-./scripts/validate-kind-data-plane.sh
+make kind-scale-proof
 ```
 
 The script:
 
 1. creates or reuses a `kind` cluster,
-2. builds the real `leaderboard-api` and `telemetry-ingester` images,
-3. loads those images into the cluster,
-4. applies `infra/k8s`,
-5. waits for Redpanda, TimescaleDB, Redis, leaderboard-api, telemetry-ingester,
-   and the Redpanda topic-init job,
-6. writes evidence under `.runs/kind-validation/`.
+2. builds and loads the real `stub-engine` and `bot-fleet` images,
+3. deploys the contestant engine as a Kubernetes `Deployment` + `Service`,
+4. runs the same Indexed Job + `--pod-index` sharding pattern shipped in
+   `infra/k8s/31-bot-fleet-job.yaml`,
+5. sweeps 2, 4, and 8 bot-fleet pods across a 4-node cluster,
+6. prints aggregate throughput, drops, nodes used, and disjoint bot-id ranges.
 
-Evidence files:
+Expected evidence:
 
 ```text
-.runs/kind-validation/nodes.txt
-.runs/kind-validation/pods-all.txt
-.runs/kind-validation/iicpc-resources.txt
-.runs/kind-validation/iicpc-events.txt
-.runs/kind-validation/redpanda-topic-init.log
+2 pods -> aggregate_orders≈40k   timeouts=0   nodes_used>=1
+4 pods -> aggregate_orders≈80k   timeouts=0   nodes_used>=2
+8 pods -> aggregate_orders≈160k  timeouts=0   nodes_used>=3
+pod_index=0..7 -> disjoint global bot ranges
 ```
 
 Submission wording:
 
-> Kubernetes proof covers the shared data plane and live leaderboard read path.
-> Upload-driven Kubernetes sandbox orchestration is deliberately documented as
-> future production work because the current verified sandbox runners are local
-> and Docker based.
+> Kubernetes proof demonstrates the horizontal load-generation pattern: an
+> Indexed Job fans bot-fleet pods across nodes, pod-index sharding prevents
+> duplicate bot IDs, and aggregate throughput scales linearly with zero drops.
+> The full 10k-bot ceiling and multi-node ingester throughput remain documented
+> residuals for a larger production cluster.
 
 ## 4. Static Validation
 

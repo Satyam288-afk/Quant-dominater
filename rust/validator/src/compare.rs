@@ -8,10 +8,12 @@ use crate::edge_cases::{ActualFill, Violation};
 pub fn compare(
     run_id: String,
     expected: &[Fill],
-    actual: &[ActualFill],
+    fills: &[ActualFill],
+    deduped_idx: &[usize],
     extra_violations: &[Violation],
 ) -> Value {
-    let actual_fills: Vec<Fill> = actual.iter().map(|entry| entry.fill.clone()).collect();
+    // The deduped fills selected by index out of the single materialised Vec.
+    let actual_fills: Vec<Fill> = deduped_idx.iter().map(|&i| fills[i].fill.clone()).collect();
 
     // Diff logic mirrors the original validator. Edge case detectors only
     // run if the diff itself passes (i.e. fills match) — otherwise the diff

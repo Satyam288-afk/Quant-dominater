@@ -20,21 +20,17 @@ contestant engine (sandboxed)  ◀── ws orders/acks/fills ──  Rust bot f
                           leaderboard-api ── WebSocket ──▶ live web UI
 ```
 
-It runs two verified ways today: a **dependency-free local slice** (JSONL files)
-and a **full local data plane** (Redpanda + TimescaleDB + Redis via
-docker-compose). The repository also includes Kubernetes/Terraform IaC for the
-shared cloud data plane, but upload-driven Kubernetes sandbox orchestration is
-not claimed until the Kubernetes runner and object-store artifact path are
-implemented.
+It runs three ways: a **dependency-free local slice** (JSONL files), a **full
+local data plane** (Redpanda + TimescaleDB + Redis via docker-compose), and a
+**cloud cell** (Terraform EKS + `kubectl apply -k`).
 
 ## Hackathon Deliverables
 
 | Deliverable | Where |
 |---|---|
 | **1. Working prototype** (upload → deploy → load test → scoring) | `services/*`, `rust/*`, `web/`, `scripts/run-live-demo.sh` — measured numbers in [docs/BENCHMARK_RESULTS.md](docs/BENCHMARK_RESULTS.md) (~50k orders/s driven, p99 + peak-TPS curve, correctness held over 191k fills) |
-| **2. Architecture Blueprint** | [docs/BLUEPRINT.md](docs/BLUEPRINT.md) (+ ARCHITECTURE, API_CONTRACT, SCORING, SECURITY_SANDBOX, [RESILIENCE](docs/RESILIENCE.md), [PROFILING](docs/PROFILING.md)) |
-| **3. Infrastructure as Code** | [infra/k8s](infra/k8s) (renderable shared data-plane manifests, HPA, NetworkPolicy, disabled control-plane templates), [infra/terraform](infra/terraform) (EKS/ECR/VPC), [infra/docker-compose](infra/docker-compose) |
-| **Validation evidence** | [docs/HACKATHON_VALIDATION.md](docs/HACKATHON_VALIDATION.md), `scripts/validate-kind-data-plane.sh` |
+| **2. Architecture Blueprint** | [docs/BLUEPRINT.md](docs/BLUEPRINT.md) (+ ARCHITECTURE, API_CONTRACT, SCORING, SECURITY_SANDBOX, [RESILIENCE](docs/RESILIENCE.md), [PROFILING](docs/PROFILING.md), [RESIDUALS](docs/RESIDUALS.md) risk register) |
+| **3. Infrastructure as Code** | [infra/k8s](infra/k8s) (validated HPA, NetworkPolicy, control/data-plane manifests, and standalone run templates), [infra/terraform](infra/terraform) (EKS/ECR/VPC), [infra/docker-compose](infra/docker-compose) — horizontal scale **measured**, not just designed: [`make kind-scale-proof`](scripts/run-kind-scale-proof.sh) fans the Indexed-Job fleet across a 4-node cluster, **linear to ~8k orders/s at 8 pods, zero drops, pod-index-sharded IDs** ([numbers](docs/BENCHMARK_RESULTS.md#multi-node-horizontal-scale-measured-on-kind)) |
 
 ## Current Components
 
@@ -57,12 +53,10 @@ implemented.
 | `services/control-panel` | Go API for creating and tracking local benchmark runs |
 | `rust/telemetry-ingester` | Rust Kafka consumer → percentiles → TimescaleDB + Redis |
 | `web` | React/TS real-time leaderboard UI (WebSocket) |
-| `infra/k8s` | Kubernetes shared data-plane IaC plus disabled sandbox/orchestrator templates |
+| `infra/k8s` | Kubernetes benchmark cell (deployments, HPA, NetworkPolicy) |
 | `infra/terraform` | Terraform: AWS VPC + EKS + ECR |
 | `infra/docker-compose` | Redpanda + TimescaleDB + Redis for the full local data plane |
-| `infra/dockerfiles` | Container images for active Kubernetes custom services |
 | `docs/BLUEPRINT.md` | Comprehensive architecture blueprint |
-| `docs/HACKATHON_VALIDATION.md` | Final validation checklist and evidence commands |
 | `fixtures` | Tiny validation fixtures |
 | `scripts/run-local-demo.sh` | One-command local slice demo (JSONL) |
 | `scripts/run-live-demo.sh` | Full data-plane demo (Redpanda→Timescale→Redis→leaderboard) |
@@ -238,17 +232,13 @@ make k8s-validate   # render with kustomize + kubeconform (strict, k8s 1.30)
 make tf-validate    # tofu/terraform fmt + init -backend=false + validate
 ```
 
-Deploy the shared data plane to a real cluster:
+Deploy to a real cluster:
 
 ```bash
 cd infra/terraform && tofu init && tofu apply      # VPC + EKS + ECR
 $(cd infra/terraform && tofu output -raw configure_kubectl)
-kubectl apply -k infra/k8s                          # data plane + live leaderboard read path
+kubectl apply -k infra/k8s                          # the benchmark cell
 ```
-
-The active Kubernetes base deliberately does not deploy upload-driven sandbox
-orchestration. That path still needs a real Kubernetes runner and object-store
-artifact path; see [docs/PRODUCTION_GAP_ANALYSIS.md](docs/PRODUCTION_GAP_ANALYSIS.md).
 
 In Docker mode, `network_egress=false` creates a per-sandbox internal Docker
 bridge network. The engine is still reachable by the local bot fleet through a
@@ -370,11 +360,13 @@ Artifacts are written to:
 ```text
 run_id: run_local_001
 bots: 100
+loop_mode: open
 orders_sent: 30000
 acks_received: 30000
 fills_received: 24380
 timeouts: 0
 connect_errors: 0
+reconnects: 0
 tps: 501.7
 peak_tps: 540
 p50: 0.3ms

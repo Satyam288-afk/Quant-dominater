@@ -12,7 +12,11 @@ func RequireServiceAuth(next http.Handler, token string) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet || r.URL.Path == "/health" {
+		// Only the unauthenticated health probe is exempt. The bug this replaces
+		// used `||`, which exempted EVERY GET — leaking all teams' run configs,
+		// scores, seeds, and host paths when a token was configured. The sibling
+		// services (submission-api, sandbox-runner) already use this `&&` form.
+		if r.Method == http.MethodGet && r.URL.Path == "/health" {
 			next.ServeHTTP(w, r)
 			return
 		}

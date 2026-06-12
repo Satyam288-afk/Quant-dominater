@@ -8,6 +8,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -54,6 +57,14 @@ type Manager struct {
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
+
+	// sem bounds how many runs build + start a sandbox concurrently. The fleet
+	// scales out, but every run funnels a docker build + container start through
+	// this single orchestrator; without a cap a burst of K queued submissions
+	// forks K simultaneous compiles + containers demanding 2K exclusive cores
+	// with no queue (Pending-pod pileup / OOMKilled builds). Acquired before a
+	// run is claimed, released when its execute goroutine returns.
+	sem chan struct{}
 }
 
 func NewManager(store Store, engine Engine, botfleet BotFleet, validator Validator, runRoot string, runTimeout time.Duration) *Manager {
@@ -68,7 +79,24 @@ func NewManager(store Store, engine Engine, botfleet BotFleet, validator Validat
 		runRoot:    runRoot,
 		runTimeout: runTimeout,
 		cancels:    make(map[string]context.CancelFunc),
+		sem:        make(chan struct{}, buildConcurrency()),
 	}
+}
+
+// buildConcurrency caps simultaneous build+run pipelines. Defaults to the host
+// CPU count, overridable with ORCHESTRATOR_BUILD_CONCURRENCY for nodes whose
+// real budget differs from their visible cores. Floored at 1.
+func buildConcurrency() int {
+	n := runtime.NumCPU()
+	if v := os.Getenv("ORCHESTRATOR_BUILD_CONCURRENCY"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			n = parsed
+		}
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
 }
 
 func (m *Manager) SetLeaderboardPublisher(publisher LeaderboardPublisher) {
@@ -76,11 +104,20 @@ func (m *Manager) SetLeaderboardPublisher(publisher LeaderboardPublisher) {
 }
 
 func (m *Manager) StartRun(ctx context.Context, runID string) (*model.BenchmarkRun, error) {
+	// Acquire a build slot before claiming so a cancel while we wait leaves the
+	// run untouched (QUEUED) instead of stranded mid-BUILDING.
+	select {
+	case m.sem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	run, err := m.store.ClaimRun(ctx, runID)
 	if err != nil {
+		<-m.sem
 		return run, err
 	}
 	if model.Terminal(run.Status) {
+		<-m.sem
 		return run, nil
 	}
 
@@ -94,8 +131,16 @@ func (m *Manager) StartRun(ctx context.Context, runID string) (*model.BenchmarkR
 }
 
 func (m *Manager) StartNextQueued(ctx context.Context) (*model.BenchmarkRun, error) {
+	// Block on a build slot first: when the pool is full the worker parks here
+	// (cheap) instead of claiming more runs into BUILDING than it can execute.
+	select {
+	case m.sem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	run, err := m.store.ClaimNextQueuedRun(ctx)
 	if err != nil {
+		<-m.sem
 		return nil, err
 	}
 	runCtx, cancel := context.WithTimeout(context.Background(), m.runTimeout)
@@ -300,6 +345,19 @@ func (m *Manager) execute(ctx context.Context, run *model.BenchmarkRun) {
 		m.mu.Unlock()
 		if cancel != nil {
 			cancel()
+		}
+		<-m.sem // release the build slot acquired by the spawning caller
+	}()
+	// Any panic on this detached goroutine would otherwise terminate the whole
+	// orchestrator process — killing every other team's in-flight run. Recover
+	// it into a FAILED run instead. Registered after the cleanup defer so it
+	// runs first (LIFO): recover and mark the run failed, then the cleanup defer
+	// still releases the build slot and cancel.
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("orchestrator run panicked",
+				"run_id", run.RunID, "panic", r, "stack", string(debug.Stack()))
+			m.fail(ctx, run, "PANIC", fmt.Errorf("panic on execute path: %v", r))
 		}
 	}()
 

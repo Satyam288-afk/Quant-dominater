@@ -137,6 +137,20 @@ struct Args {
     /// 0 (single process) is byte-identical to the legacy behaviour.
     #[arg(long, env = "JOB_COMPLETION_INDEX", default_value_t = 0)]
     pod_index: usize,
+
+    /// Latency floor probe: each bot sends its next order the moment the
+    /// previous one is acked, instead of on the --orders-per-sec timer. With
+    /// the timer, a bot's task parks between sends and every round trip pays
+    /// the scheduler wake-up (~100-250µs on this host) on top of the ~20µs
+    /// WS+JSON transport floor — so open-loop percentiles measure the platform
+    /// under realistic arrival processes, while closed-loop measures the floor
+    /// itself (the wrk2-style open- vs closed-loop distinction). The wire
+    /// protocol, order mix, measurement stamps and validation pipeline are
+    /// identical; --orders-per-sec is ignored. Direct connections only
+    /// (incompatible with --ws-connections: multiplexing would serialize the
+    /// probes onto shared sockets and measure queueing, not the floor).
+    #[arg(long, default_value_t = false)]
+    closed_loop: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -228,6 +242,12 @@ async fn main() -> Result<()> {
     if args.orders_per_sec == 0 {
         anyhow::bail!("--orders-per-sec must be greater than zero");
     }
+    if args.closed_loop && args.ws_connections > 0 {
+        anyhow::bail!(
+            "--closed-loop is a per-connection latency probe and requires direct \
+             connections (one per bot); drop --ws-connections"
+        );
+    }
     if args.symbols == 0 {
         // Default: one symbol per bot — byte-identical to legacy behaviour.
         args.symbols = args.bots.max(1);
@@ -312,12 +332,21 @@ async fn main() -> Result<()> {
                 market_per_mille: args.market_per_mille,
                 cancel_per_mille: args.cancel_per_mille,
             };
-            handles.push(tokio::spawn(run_bot(
-                config,
-                event_tx.clone(),
-                output_tx.clone(),
-                Arc::clone(&sink),
-            )));
+            if args.closed_loop {
+                handles.push(tokio::spawn(run_bot_closed_loop(
+                    config,
+                    event_tx.clone(),
+                    output_tx.clone(),
+                    Arc::clone(&sink),
+                )));
+            } else {
+                handles.push(tokio::spawn(run_bot(
+                    config,
+                    event_tx.clone(),
+                    output_tx.clone(),
+                    Arc::clone(&sink),
+                )));
+            }
         }
     }
 
@@ -354,6 +383,14 @@ async fn main() -> Result<()> {
 
     println!("run_id: {}", args.run_id);
     println!("bots: {}", args.bots);
+    println!(
+        "loop_mode: {}",
+        if args.closed_loop {
+            "closed (latency floor probe)"
+        } else {
+            "open"
+        }
+    );
     println!("orders_sent: {}", totals.orders_sent);
     println!("acks_received: {}", totals.acks_received);
     println!("fills_received: {}", totals.fills_received);
@@ -487,7 +524,13 @@ async fn run_bot(
                         ).await?;
                     }
                     Some(Ok(_)) => {}
-                    Some(Err(err)) => return Err(err.into()),
+                    Some(Err(err)) => {
+                        // Read error mid-run (engine crash / reset): stop reading
+                        // and finish with the stats gathered so far instead of
+                        // discarding this bot's whole contribution.
+                        eprintln!("bot {bot_id} read error mid-run: {err}");
+                        break;
+                    }
                     None => break,
                 }
             }
@@ -500,6 +543,176 @@ async fn run_bot(
     }
 
     stats.timeouts = pending.len() as u64;
+    Ok(stats)
+}
+
+/// Closed-loop sibling of [`run_bot`] (`--closed-loop`): the next order goes
+/// out the moment the previous one is acked, no rate timer. The task only ever
+/// parks on `read.next()` with its own ack already in flight (~tens of µs out),
+/// so the measured round trip is the WS+JSON transport floor, not the cold
+/// task wake-up an idle open-loop bot pays. Everything on the measurement path
+/// is shared with the open loop — same [`build_send`], same wire-adjacent
+/// stamp after `write.send`, same [`handle_engine_message`] — so the two modes
+/// differ only in *when* a send is triggered.
+///
+/// One accounting divergence, conservative by construction: the ack timeout is
+/// enforced *per order* (an ack arriving after it counts as a timeout and is
+/// discarded), whereas the open loop only converts still-pending orders to
+/// timeouts at run end. Under a degraded engine the probe therefore reports
+/// more timeouts / fewer acks than the open loop would — it can never flatter
+/// the floor numbers.
+async fn run_bot_closed_loop(
+    config: BotConfig,
+    event_tx: mpsc::UnboundedSender<Value>,
+    output_tx: mpsc::UnboundedSender<Value>,
+    sink: Arc<dyn TelemetrySink>,
+) -> Result<BotStats> {
+    let bot_id = format!("bot_{}", config.global_bot_index + 1);
+    let (ws_stream, _) =
+        connect_async_with_config(config.target.as_str(), Some(pool::ws_config()), false)
+            .await
+            .with_context(|| format!("{bot_id} connect {}", config.target))?;
+    // TCP_NODELAY: don't let Nagle buffer small order frames (see pool.rs).
+    if let MaybeTlsStream::Plain(tcp) = ws_stream.get_ref() {
+        let _ = tcp.set_nodelay(true);
+    }
+    let (mut write, mut read) = ws_stream.split();
+
+    let mut stats = BotStats::default();
+    let mut pending: HashMap<String, Instant> = HashMap::new();
+    let mut sent_orders: Vec<String> = Vec::new();
+    let mut seq_no = 0_u64;
+    let started = Instant::now();
+    let deadline = started + config.duration;
+
+    while Instant::now() < deadline {
+        seq_no += 1;
+        let prepared = build_send(&config, &bot_id, seq_no, &sent_orders);
+        let track_id = prepared.track_id.clone();
+        write.send(Message::Text(prepared.text)).await?;
+        pending.insert(track_id.clone(), Instant::now());
+        stats.orders_sent += 1;
+        if config.cancel_per_mille > 0 && prepared.is_new {
+            sent_orders.push(track_id.clone());
+            if sent_orders.len() > 512 {
+                sent_orders.remove(0);
+            }
+        }
+
+        let _ = event_tx.send(prepared.event);
+        let _ = sink
+            .emit(TelemetryEvent {
+                run_id: config.run_id.clone(),
+                bot_id: bot_id.clone(),
+                seq_no,
+                client_order_id: prepared.track_id,
+                event_type: EventKind::OrderSent,
+                send_ts_ns: prepared.send_ts_ns,
+                recv_ts_ns: 0,
+                latency_ns: 0,
+            })
+            .await;
+
+        // Read until the order just sent is acked. Fills (for this or earlier
+        // resting orders) arrive interleaved and are processed as normal.
+        let wait_started = Instant::now();
+        while pending.contains_key(&track_id) {
+            let Some(remaining) = config.ack_timeout.checked_sub(wait_started.elapsed()) else {
+                pending.remove(&track_id);
+                stats.timeouts += 1;
+                break;
+            };
+            match tokio::time::timeout(remaining, read.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    handle_engine_message(
+                        &config.run_id,
+                        &bot_id,
+                        &text,
+                        &mut pending,
+                        &mut stats,
+                        &output_tx,
+                        &sink,
+                    )
+                    .await?;
+                }
+                Ok(Some(Ok(Message::Binary(bytes)))) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    handle_engine_message(
+                        &config.run_id,
+                        &bot_id,
+                        &text,
+                        &mut pending,
+                        &mut stats,
+                        &output_tx,
+                        &sink,
+                    )
+                    .await?;
+                }
+                Ok(Some(Ok(_))) => {}
+                Ok(Some(Err(err))) => {
+                    // Read error mid-run (engine crash / reset): return the
+                    // stats accumulated so far rather than discarding the whole
+                    // bot's contribution. Still-pending orders are timeouts.
+                    eprintln!("bot {bot_id} read error mid-run: {err}");
+                    stats.timeouts += pending.len() as u64;
+                    return Ok(stats);
+                }
+                Ok(None) => {
+                    // Engine closed the connection: whatever is still pending
+                    // can never be acked.
+                    stats.timeouts += pending.len() as u64;
+                    return Ok(stats);
+                }
+                Err(_elapsed) => {
+                    pending.remove(&track_id);
+                    stats.timeouts += 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Mirror the open loop's ~10 ms post-deadline grace: fills the engine
+    // emits after the final ack (e.g. a resting order crossed at run end)
+    // would otherwise never be read into contestant_outputs.jsonl.
+    let drain_until = Instant::now() + Duration::from_millis(10);
+    loop {
+        let now = Instant::now();
+        if now >= drain_until {
+            break;
+        }
+        match tokio::time::timeout(drain_until - now, read.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                handle_engine_message(
+                    &config.run_id,
+                    &bot_id,
+                    &text,
+                    &mut pending,
+                    &mut stats,
+                    &output_tx,
+                    &sink,
+                )
+                .await?;
+            }
+            Ok(Some(Ok(Message::Binary(bytes)))) => {
+                let text = String::from_utf8_lossy(&bytes);
+                handle_engine_message(
+                    &config.run_id,
+                    &bot_id,
+                    &text,
+                    &mut pending,
+                    &mut stats,
+                    &output_tx,
+                    &sink,
+                )
+                .await?;
+            }
+            Ok(Some(Ok(_))) => {}
+            Ok(Some(Err(_))) | Ok(None) | Err(_) => break,
+        }
+    }
+
+    stats.timeouts += pending.len() as u64;
     Ok(stats)
 }
 
@@ -711,8 +924,13 @@ async fn handle_engine_message(
     output_tx: &mpsc::UnboundedSender<Value>,
     sink: &Arc<dyn TelemetrySink>,
 ) -> Result<()> {
-    let message: Value =
-        serde_json::from_str(text).with_context(|| format!("decode engine message: {text}"))?;
+    // Drop an unparseable frame rather than erroring out of the bot: a hostile
+    // or buggy engine emitting one line of garbage must not tear down the whole
+    // connection and discard the bot's accumulated, correctly-measured stats.
+    // This is parity with the pooled reader (see pool.rs: `Err(_) => continue`).
+    let Ok(message) = serde_json::from_str::<Value>(text) else {
+        return Ok(());
+    };
     let message_type = message.get("type").and_then(Value::as_str).unwrap_or("");
     let recv_ts_ns = now_ns();
 

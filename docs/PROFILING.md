@@ -338,6 +338,50 @@ CPU-bound at ~52 µs/order and the release fleet is **syscall-bound** (`sys` >
 `user`): user-space JSON micro-opts genuinely do not move this system, exactly
 as Rounds 1-2 concluded.
 
+## Round 5 — decompose the round trip, then measure the floor directly
+
+With the instrument clean, the question moved from "is the number right?" to
+"what *is* the number?". Micro-harnesses on this host decomposed the canonical
+demo's ~0.26 ms p50 round trip:
+
+| Layer | p50 | Share |
+|---|---|---|
+| Matching + ack marshal inside the engine | ~3 µs | ~1 % |
+| TCP loopback + WS framing + JSON both sides (the contract) | ~20 µs | ~8 % |
+| **Parked-task scheduler wake-ups in the open-loop fleet** | **~230 µs** | **~90 %** |
+
+The dominant term is not the contract and not the engine — it's the *load
+generator's own arrival process*. An open-loop bot at 5 orders/s sleeps ~200 ms
+between sends; its task (and the timer that drives it) parks, and every round
+trip pays the kernel/scheduler wake-up chain from cold (~85–120 µs measured)
+twice. A hot request-response loop against the same engine, same WS+JSON, same
+loopback measures **~22 µs p50** — the true in-contract floor.
+
+So the fleet now exposes both operating points (`--closed-loop`):
+
+- **Open loop** (default, scored): orders fire on the rate timer regardless of
+  responses — the correct way to measure latency under a realistic arrival
+  process (it cannot hide queueing: the wrk2 / coordinated-omission argument).
+- **Closed loop** (latency floor probe): each bot sends the next order the
+  moment the previous one is acked. The task never goes cold, so the measured
+  percentiles are the transport floor itself. Same `build_send`, same
+  wire-adjacent stamps, same ack handling, same validation pipeline — the modes
+  differ only in *when* a send triggers.
+
+Measured (release fleet, disruptor stub, same canonical order mix): 1 bot
+closed-loop sustains **~28 k orders/s on one connection at p50 0.03 ms /
+p99 0.05 ms** over 138 k orders, zero timeouts, and the run replays
+`"valid": true` through the validator; 4 bots sustain ~57 k orders/s at
+p50 0.06 ms. Against the open-loop canonical p50 0.26 ms, that is the
+~10× scheduler tax, isolated and measured rather than guessed.
+
+What Round 5 deliberately did **not** do: busy-spin the open-loop fleet
+(`gosched`-style spinning was already measured in Round 3 — ~7 cores burned for
+a near-idle win and a *worse* saturation tail), and anything below ~20 µs —
+FIX/REST/WS all ride kernel TCP and the spec's metric is ack round-trip, so
+sub-floor numbers would require shared memory or kernel bypass, outside the
+contract the contestants implement.
+
 ## Reproduce it
 
 ```bash

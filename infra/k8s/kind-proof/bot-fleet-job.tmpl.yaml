@@ -1,0 +1,36 @@
+# Proof variant of 31-bot-fleet-job.yaml for a local kind multi-node run:
+# same Indexed-Job + --pod-index sharding, lighter per-pod load and --backend
+# none (no Redpanda) so it measures the FLEET's horizontal scale in isolation.
+apiVersion: batch/v1
+kind: Job
+metadata: { name: JOB_NAME, namespace: scale-proof }
+spec:
+  parallelism: PARALLELISM
+  completions: PARALLELISM
+  backoffLimit: 0
+  completionMode: Indexed
+  ttlSecondsAfterFinished: 1200
+  template:
+    metadata: { labels: { app: bot-fleet } }
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: bot-fleet
+          image: iicpc/bot-fleet:proof
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              exec bot-fleet \
+                --target "ws://stub-engine.scale-proof.svc.cluster.local:8080/ws" \
+                --run-id "kind_scale" \
+                --bots 100 --orders-per-sec 10 --duration-sec 20 \
+                --ws-connections 8 \
+                --pod-index "${JOB_COMPLETION_INDEX:-0}" \
+                --seed 42 --symbols 64 --price-levels 9 --qty-max 50 \
+                --market-per-mille 100 --cancel-per-mille 100 \
+                --backend none \
+                --events-out /tmp/events.jsonl --outputs-out /tmp/outputs.jsonl
+          resources:
+            requests: { cpu: "150m", memory: "96Mi" }
+            limits: { cpu: "1", memory: "256Mi" }
