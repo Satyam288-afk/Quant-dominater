@@ -1,6 +1,9 @@
 package sandbox
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestSanitizeDockerTag(t *testing.T) {
 	got := sanitizeDockerTag("Team/Sub_01!")
@@ -18,23 +21,32 @@ func TestNormalizeDockerResources(t *testing.T) {
 	}
 }
 
-func TestDockerNetworkPlanHonorsEgressFlag(t *testing.T) {
-	isolated := dockerNetworkPlanFor(SandboxSpec{NetworkEgress: false}, "sandbox_123")
-	if !isolated.isolated {
-		t.Fatal("network_egress=false should create an isolated network")
+func TestDockerNetworkPlanUsesHostReachableBridge(t *testing.T) {
+	for _, spec := range []SandboxSpec{
+		{NetworkEgress: false},
+		{NetworkEgress: true},
+	} {
+		plan := dockerNetworkPlanFor(spec, "sandbox_123")
+		if plan.isolated {
+			t.Fatal("Docker mode should stay host-reachable on bridge; hard egress denial is the K8s path")
+		}
+		if plan.name != "bridge" {
+			t.Fatalf("network name = %q, want bridge", plan.name)
+		}
+		if string(plan.mode) != "bridge" {
+			t.Fatalf("network mode = %q, want bridge", plan.mode)
+		}
 	}
-	if isolated.name != "iicpc-sandbox_123" {
-		t.Fatalf("isolated network name = %q", isolated.name)
-	}
-	if string(isolated.mode) != isolated.name {
-		t.Fatalf("isolated network mode = %q, want %q", isolated.mode, isolated.name)
-	}
+}
 
-	bridge := dockerNetworkPlanFor(SandboxSpec{NetworkEgress: true}, "sandbox_123")
-	if bridge.isolated {
-		t.Fatal("network_egress=true should use the default bridge network")
+func TestDockerContainerStartTimeoutAllowsColdDocker(t *testing.T) {
+	if dockerContainerStartTimeout < 2*time.Minute {
+		t.Fatalf("dockerContainerStartTimeout = %s, want at least 2m", dockerContainerStartTimeout)
 	}
-	if string(bridge.mode) != "bridge" {
-		t.Fatalf("bridge network mode = %q", bridge.mode)
+	if dockerHostPortTimeout < time.Minute {
+		t.Fatalf("dockerHostPortTimeout = %s, want at least 1m", dockerHostPortTimeout)
+	}
+	if dockerInspectTimeout > 2*time.Second {
+		t.Fatalf("dockerInspectTimeout = %s, want at most 2s", dockerInspectTimeout)
 	}
 }
