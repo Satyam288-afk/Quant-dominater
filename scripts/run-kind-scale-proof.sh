@@ -55,7 +55,8 @@ kc -n "$NS" wait --for=condition=available deploy/stub-engine --timeout=90s
 
 echo "==> [4/5] horizontal-scale sweep — same 100-bot/pod load, vary pod count"
 run_sweep() {
-  local p="$1" name="fleet-p$p" total=0 drops=0
+  local p="$1"
+  local name="fleet-p$p" total=0 drops=0
   sed "s/JOB_NAME/$name/; s/PARALLELISM/$p/" infra/k8s/kind-proof/bot-fleet-job.tmpl.yaml | kc apply -f - >/dev/null
   kc -n "$NS" wait --for=condition=complete "job/$name" --timeout=180s >/dev/null
   for i in $(seq 0 $((p - 1))); do
@@ -76,8 +77,8 @@ run_sweep 8
 echo "==> [5/5] pod_index sharding (disjoint global bot-id ranges, no collisions)"
 kc -n "$NS" get pods -l app=bot-fleet -o wide --no-headers | grep 'fleet-p8-' | awk '{print "    "$1" on "$7}'
 for i in $(seq 0 7); do
-  pod="$(kc -n "$NS" get pods -l app=bot-fleet -o name | grep "fleet-p8-$i-" | head -1)"
-  rng="$(kc -n "$NS" logs "$pod" 2>/dev/null | grep -oE 'global bots [0-9]+\.\.[0-9]+' | head -1)"
+  pod="$(kc -n "$NS" get pods -l app=bot-fleet -o name | grep "fleet-p8-$i-" | head -1 || true)"
+  rng="$(kc -n "$NS" logs "$pod" 2>/dev/null | grep -oE 'global bots [0-9]+\.\.[0-9]+' | head -1 || true)"
   printf "    pod_index=%d  %s\n" "$i" "${rng:-global bots 1..100}"
 done
 

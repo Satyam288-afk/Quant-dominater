@@ -110,12 +110,29 @@ impl ConnectionPool {
 
         let mut senders = Vec::with_capacity(n_conns);
         for _ in 0..n_conns {
-            // Initial connect is still strict: if the engine is unreachable at
-            // startup we fail the run (preserves the original semantics). Only
-            // DROPS after a successful start are healed by the supervisor.
-            let (ws_stream, _) = connect_async_with_config(target, Some(ws_config()), false)
-                .await
-                .with_context(|| format!("pool connect {}", target))?;
+            // Initial connect retries briefly to absorb kube-proxy iptables lag
+            // (the engine pod may be Ready before its ClusterIP is routable on
+            // every worker node).  After the first successful handshake the
+            // supervisor handles all further reconnects.
+            let ws_stream = {
+                const MAX_TRIES: u32 = 8;
+                const RETRY_MS: u64 = 500;
+                let mut last_err = anyhow::anyhow!("no attempts");
+                let mut ws = None;
+                for attempt in 0..MAX_TRIES {
+                    match connect_async_with_config(target, Some(ws_config()), false).await {
+                        Ok((s, _)) => { ws = Some(s); break; }
+                        Err(e) => {
+                            last_err = anyhow::anyhow!("{}", e);
+                            if attempt + 1 < MAX_TRIES {
+                                sleep(Duration::from_millis(RETRY_MS)).await;
+                            }
+                        }
+                    }
+                }
+                ws.ok_or_else(|| last_err)
+                    .with_context(|| format!("pool connect {}", target))?
+            };
             set_nodelay(&ws_stream);
 
             // Bots push (track_id, order text) into this bounded channel; the
