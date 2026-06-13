@@ -57,6 +57,46 @@ func TestPrepareBuildContextSingleGoFile(t *testing.T) {
 	}
 }
 
+func TestPrepareBuildContextUnwrapsSingleProjectDirectoryZip(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "engine.zip")
+	file, err := os.Create(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(file)
+	for name, body := range map[string]string{
+		"team-engine/go.mod":  "module teamengine\n\ngo 1.22\n",
+		"team-engine/main.go": "package main\n\nfunc main() {}\n",
+	} {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := filepath.Join(t.TempDir(), "build")
+	if _, err := prepareBuildContext(src, dst, "go"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"go.mod", "main.go", "Dockerfile"} {
+		if !fileExists(filepath.Join(dst, name)) {
+			t.Fatalf("expected %s at build context root", name)
+		}
+	}
+	if fileExists(filepath.Join(dst, "team-engine")) {
+		t.Fatal("single wrapper directory should have been unwrapped")
+	}
+}
+
 func TestDefaultDockerfilePerLanguage(t *testing.T) {
 	cases := map[string]string{
 		"go":     "golang:1.22-alpine",

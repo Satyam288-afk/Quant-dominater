@@ -78,6 +78,10 @@ func prepareBuildContext(src string, dst string, language string) (contestantDoc
 		}
 	}
 
+	if err := normalizeBuildContextRoot(dst); err != nil {
+		return false, err
+	}
+
 	dockerfilePath := filepath.Join(dst, "Dockerfile")
 	if !fileExists(dockerfilePath) {
 		return false, writeDefaultDockerfile(dst, language)
@@ -86,6 +90,67 @@ func prepareBuildContext(src string, dst string, language string) (contestantDoc
 		return true, err
 	}
 	return true, nil
+}
+
+// normalizeBuildContextRoot accepts the common "zip the project folder" shape:
+// engine.zip -> engine/go.mod + engine/main.go. The Docker build context should
+// be the project root, not the wrapper directory, so move a single build-root
+// directory up one level. Archives that already have root-level build files are
+// left untouched.
+func normalizeBuildContextRoot(dst string) error {
+	if hasBuildRootMarker(dst) {
+		return nil
+	}
+	entries, err := os.ReadDir(dst)
+	if err != nil {
+		return err
+	}
+	var candidate os.DirEntry
+	for _, entry := range entries {
+		if ignoredArchiveRootEntry(entry.Name()) {
+			continue
+		}
+		if candidate != nil {
+			return nil
+		}
+		candidate = entry
+	}
+	if candidate == nil || !candidate.IsDir() {
+		return nil
+	}
+
+	srcRoot := filepath.Join(dst, candidate.Name())
+	if !hasBuildRootMarker(srcRoot) {
+		return nil
+	}
+	children, err := os.ReadDir(srcRoot)
+	if err != nil {
+		return err
+	}
+	for _, child := range children {
+		from := filepath.Join(srcRoot, child.Name())
+		to := filepath.Join(dst, child.Name())
+		if fileExists(to) {
+			return fmt.Errorf("cannot unwrap build context %q: target %q already exists", candidate.Name(), child.Name())
+		}
+		if err := os.Rename(from, to); err != nil {
+			return err
+		}
+	}
+	return os.Remove(srcRoot)
+}
+
+func hasBuildRootMarker(dir string) bool {
+	for _, name := range []string{"Dockerfile", "go.mod", "Cargo.toml", "CMakeLists.txt", "Makefile", "engine"} {
+		if fileExists(filepath.Join(dir, name)) {
+			return true
+		}
+	}
+	return false
+}
+
+func ignoredArchiveRootEntry(name string) bool {
+	return name == "__MACOSX" || name == ".DS_Store"
 }
 
 // validateUntrustedDockerfile rejects a contestant Dockerfile that fetches a

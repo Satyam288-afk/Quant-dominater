@@ -41,7 +41,7 @@ type sandboxImageRef struct {
 type sandboxStartRequest struct {
 	RunID      string            `json:"run_id"`
 	ImageRef   string            `json:"image_ref"`
-	EngineMode string            `json:"engine_mode"`
+	EngineMode string            `json:"engine_mode,omitempty"`
 	EventsPath string            `json:"events_path,omitempty"`
 	Spec       model.SandboxSpec `json:"spec"`
 }
@@ -105,7 +105,6 @@ func (e *SandboxEngine) Start(ctx context.Context, run *model.BenchmarkRun) (Eng
 	req := sandboxStartRequest{
 		RunID:      run.RunID,
 		ImageRef:   imageRef,
-		EngineMode: "normal",
 		EventsPath: filepath.Join(run.ArtifactDir, "engine_outputs.jsonl"),
 		Spec:       run.Sandbox,
 	}

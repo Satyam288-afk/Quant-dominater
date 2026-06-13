@@ -83,7 +83,6 @@ import (
 
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
-	flag.String("mode", "normal", "unused mode")
 	flag.String("events", "events.jsonl", "unused events path")
 	flag.Parse()
 

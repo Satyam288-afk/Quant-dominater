@@ -168,10 +168,6 @@ func (r *LocalRunner) Start(ctx context.Context, req StartRequest) (SandboxHandl
 	if req.ImageRef == "" {
 		return SandboxHandle{}, errors.New("image_ref is required")
 	}
-	if req.EngineMode == "" {
-		req.EngineMode = "normal"
-	}
-
 	r.mu.Lock()
 	image := r.images[req.ImageRef]
 	r.mu.Unlock()
@@ -212,8 +208,10 @@ func (r *LocalRunner) Start(ctx context.Context, req StartRequest) (SandboxHandl
 
 	args := []string{
 		"--addr", fmt.Sprintf(":%d", port),
-		"--mode", req.EngineMode,
 		"--events", eventsPath,
+	}
+	if req.EngineMode != "" {
+		args = append(args, "--mode", req.EngineMode)
 	}
 	_, _ = fmt.Fprintf(logFile, "$ %s %v\n", image.binaryPath, args)
 
