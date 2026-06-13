@@ -92,8 +92,37 @@ func main() {
 	mux.HandleFunc("GET /api/leaderboard", handler.leaderboard)
 	mux.Handle("GET /", http.FileServer(http.Dir(cfg.UIRoot)))
 
+	srv := &http.Server{
+		Addr:              cfg.Addr,
+		Handler:           limitInFlight(mux, maxInFlightRequests),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
 	log.Printf("console API listening on %s ui=%s submission=%s orchestrator=%s leaderboard=%s", cfg.Addr, cfg.UIRoot, cfg.SubmissionURL, cfg.OrchestratorURL, cfg.LeaderboardURL)
-	log.Fatal(http.ListenAndServe(cfg.Addr, mux))
+	log.Fatal(srv.ListenAndServe())
+}
+
+// maxInFlightRequests bounds concurrent requests to protect against connection
+// exhaustion. golang.org/x/net/netutil is not a dependency, so we cap in-flight
+// requests with a simple semaphore middleware instead of adding one.
+const maxInFlightRequests = 256
+
+// limitInFlight rejects requests beyond max concurrent in-flight requests with
+// 503 instead of unbounded resource use.
+func limitInFlight(next http.Handler, max int) http.Handler {
+	sem := make(chan struct{}, max)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case sem <- struct{}{}:
+			defer func() { <-sem }()
+			next.ServeHTTP(w, r)
+		default:
+			writeError(w, http.StatusServiceUnavailable, "server busy: too many concurrent requests")
+		}
+	})
 }
 
 func loadConfig() (Config, error) {

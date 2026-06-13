@@ -98,9 +98,28 @@ func validateUntrustedDockerfile(path string) error {
 	if err != nil {
 		return err
 	}
+	// Fold trailing-backslash continuations into one logical line before
+	// tokenizing, otherwise an `ADD \` split across physical lines hides the
+	// remote URL on the following line from the per-line scan below. Comment
+	// lines are dropped first so a `#`-prefixed continuation can't smuggle the
+	// URL either.
+	var logical strings.Builder
 	for _, raw := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(strings.TrimRight(raw, "\r"))
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasSuffix(trimmed, "\\") {
+			logical.WriteString(strings.TrimSuffix(trimmed, "\\"))
+			logical.WriteByte(' ')
+			continue
+		}
+		logical.WriteString(trimmed)
+		logical.WriteByte('\n')
+	}
+	for _, raw := range strings.Split(logical.String(), "\n") {
 		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" {
 			continue
 		}
 		fields := strings.Fields(line)
@@ -237,6 +256,13 @@ func unzip(src string, dst string) error {
 		// Cheap screen: reject an entry whose declared ratio is absurd.
 		if file.CompressedSize64 > 0 && file.UncompressedSize64/file.CompressedSize64 > maxZipRatio {
 			return fmt.Errorf("zip entry %q exceeds max compression ratio", file.Name)
+		}
+		// Fail fast on the declared cumulative size: if the headers already
+		// promise more than the cap, refuse BEFORE writing this entry so a bomb
+		// with honest headers writes nothing at all. The LimitReader+probe below
+		// remains the hard wall for entries that lie about their size.
+		if file.UncompressedSize64 > uint64(maxZipTotalBytes-total) {
+			return fmt.Errorf("zip expands beyond %d bytes; refusing to extract", int64(maxZipTotalBytes))
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err

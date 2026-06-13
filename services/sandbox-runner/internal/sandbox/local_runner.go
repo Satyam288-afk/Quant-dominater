@@ -53,7 +53,7 @@ func NewLocalRunner(repoRoot string, runRoot string) *LocalRunner {
 	}
 }
 
-func (r *LocalRunner) Build(ctx context.Context, req BuildRequest) (ImageRef, error) {
+func (r *LocalRunner) Build(ctx context.Context, req BuildRequest) (_ ImageRef, err error) {
 	if req.SubmissionID == "" {
 		return ImageRef{}, errors.New("submission_id is required")
 	}
@@ -80,6 +80,13 @@ func (r *LocalRunner) Build(ctx context.Context, req BuildRequest) (ImageRef, er
 
 	buildID := fmt.Sprintf("%s_%d", sanitizeDockerTag(req.SubmissionID), time.Now().UnixNano())
 	buildDir := filepath.Join(r.runRoot, "builds", buildID)
+	// Reclaim a failed/oversized build dir (extracted artifact, partial binary)
+	// so a rejected or broken build does not leak disk on the host.
+	defer func() {
+		if err != nil {
+			_ = os.RemoveAll(buildDir)
+		}
+	}()
 	if _, err := prepareBuildContext(artifactPath, buildDir, req.Language); err != nil {
 		return ImageRef{}, err
 	}

@@ -34,6 +34,7 @@ func (h *Handler) Health(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (h *Handler) CreateRun(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	defer r.Body.Close()
 
 	var req run.RunRequest
@@ -46,6 +47,14 @@ func (h *Handler) CreateRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+
+	// The pointer returned by CreateRun is the live run that the spawned
+	// execute() goroutine mutates. Encoding it directly races with that
+	// goroutine, so fetch a fresh clone from the store (which clones on Get)
+	// and encode a value execute() never touches.
+	if snapshot, gerr := h.store.Get(r.Context(), br.RunID); gerr == nil {
+		br = snapshot
 	}
 
 	writeJSON(w, http.StatusAccepted, br)

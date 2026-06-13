@@ -2,6 +2,14 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Fail-closed auth for the judged demo: generate a strong random service-auth
+# token if none was provided and require auth on every service. Every service
+# launched below inherits SERVICE_AUTH_TOKEN + REQUIRE_AUTH via the exports.
+: "${SERVICE_AUTH_TOKEN:=$(head -c 32 /dev/urandom | xxd -p -c 64 2>/dev/null || openssl rand -hex 32)}"
+export SERVICE_AUTH_TOKEN
+export REQUIRE_AUTH=1
+
 STACK_DIR="$ROOT_DIR/.runs/console-stack"
 
 SUBMISSION_ADDR="${SUBMISSION_API_ADDR:-:9110}"
@@ -103,7 +111,10 @@ echo "packaging example upload artifact"
 )
 
 start_service submission-api services/submission-api env SUBMISSION_API_ADDR="$SUBMISSION_ADDR" SUBMISSION_ARTIFACT_ROOT="$SUBMISSION_ROOT" SUBMISSION_INDEX_PATH="$SUBMISSION_INDEX" go run .
-start_service sandbox-runner services/sandbox-runner env SANDBOX_RUNNER_ADDR="$SANDBOX_ADDR" SANDBOX_RUNNER_MODE=local SUBMISSION_ARTIFACT_ROOT="$SUBMISSION_ROOT" go run .
+# docker mode builds the submitted artifact into an isolated container (safe
+# sandbox). It requires a running Docker daemon on the host; without one the
+# sandbox-runner exits at startup (NewDockerRunner) and the stack will fail fast.
+start_service sandbox-runner services/sandbox-runner env SANDBOX_RUNNER_ADDR="$SANDBOX_ADDR" SANDBOX_RUNNER_MODE=docker SUBMISSION_ARTIFACT_ROOT="$SUBMISSION_ROOT" go run .
 start_service leaderboard-api services/leaderboard-api env LEADERBOARD_API_ADDR="$LEADERBOARD_ADDR" LEADERBOARD_STORE_PATH="$LEADERBOARD_STORE" go run .
 start_service orchestrator services/orchestrator env ORCHESTRATOR_ADDR="$ORCH_ADDR" ORCHESTRATOR_AUTO_START=false ORCHESTRATOR_STORE_PATH="$SUBMISSION_INDEX" SANDBOX_RUNNER_URL="$SANDBOX_URL" LEADERBOARD_URL="$LEADERBOARD_URL" go run .
 start_service console-api services/console-api env CONSOLE_API_ADDR="$CONSOLE_ADDR" SUBMISSION_API_URL="$SUBMISSION_URL" ORCHESTRATOR_URL="$ORCH_URL" LEADERBOARD_URL="$LEADERBOARD_URL" go run .

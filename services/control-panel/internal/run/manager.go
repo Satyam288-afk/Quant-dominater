@@ -30,12 +30,20 @@ type Store interface {
 	List(ctx context.Context) ([]*BenchmarkRun, error)
 }
 
+// maxConcurrentRuns bounds the number of in-flight execute() goroutines. Each
+// run spawns an engine plus a bot fleet, so an unbounded "go m.execute" lets a
+// burst of POST /api/runs exhaust host CPU/memory/FDs. Excess requests are
+// rejected rather than queued, matching the synchronous accept semantics.
+const maxConcurrentRuns = 8
+
 type Manager struct {
 	engine       EngineExecutor
 	botfleet     BotFleetExecutor
 	validator    ValidatorExecutor
 	store        Store
 	artifactRoot string
+
+	sem chan struct{}
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
@@ -48,6 +56,7 @@ func NewManager(engine EngineExecutor, botfleet BotFleetExecutor, validator Vali
 		validator:    validator,
 		store:        store,
 		artifactRoot: artifactRoot,
+		sem:          make(chan struct{}, maxConcurrentRuns),
 		cancels:      make(map[string]context.CancelFunc),
 	}
 }
@@ -57,6 +66,23 @@ func (m *Manager) CreateRun(ctx context.Context, req RunRequest) (*BenchmarkRun,
 	if err != nil {
 		return nil, err
 	}
+
+	// Reserve a concurrency slot before doing any work, so we never create
+	// artifacts or store records for a run we cannot execute. Non-blocking:
+	// reject when at capacity rather than queueing behind the HTTP request.
+	select {
+	case m.sem <- struct{}{}:
+	default:
+		return nil, errors.New("too many concurrent runs; retry later")
+	}
+	// Release the slot if we fail before handing ownership to execute(); once
+	// the goroutine is launched, it releases the slot when it returns.
+	launched := false
+	defer func() {
+		if !launched {
+			<-m.sem
+		}
+	}()
 
 	runID := fmt.Sprintf("run_%d", time.Now().UnixNano())
 	artifactDir := filepath.Join(m.artifactRoot, runID)
@@ -97,9 +123,48 @@ func (m *Manager) CreateRun(ctx context.Context, req RunRequest) (*BenchmarkRun,
 	m.cancels[runID] = cancel
 	m.mu.Unlock()
 
+	launched = true
 	go m.execute(runCtx, r)
 
 	return r, nil
+}
+
+// Shutdown cancels every in-flight run so its goroutine unwinds and persists a
+// terminal (cancelled) state instead of being orphaned past process exit, then
+// waits — bounded by ctx — for those goroutines to drain. Run contexts are
+// rooted at context.Background() (so HTTP request cancellation can't kill a
+// healthy run), which is exactly why they need an explicit cancel on SIGTERM:
+// without this, a `kill` mid-run leaves a goroutine (and its child engine
+// process) running detached and the run wedged mid-flight on disk.
+func (m *Manager) Shutdown(ctx context.Context) {
+	m.mu.Lock()
+	inflight := len(m.cancels)
+	for _, cancel := range m.cancels {
+		cancel()
+	}
+	m.mu.Unlock()
+	if inflight == 0 {
+		return
+	}
+	slog.Info("control panel shutdown: cancelling in-flight runs", "count", inflight)
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		m.mu.Lock()
+		remaining := len(m.cancels)
+		m.mu.Unlock()
+		if remaining == 0 {
+			slog.Info("control panel shutdown: all runs drained")
+			return
+		}
+		select {
+		case <-ctx.Done():
+			slog.Warn("control panel shutdown grace elapsed with runs still draining", "remaining", remaining)
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func (m *Manager) CancelRun(ctx context.Context, runID string) (*BenchmarkRun, error) {
@@ -134,6 +199,7 @@ func (m *Manager) execute(ctx context.Context, r *BenchmarkRun) {
 		m.mu.Lock()
 		delete(m.cancels, r.RunID)
 		m.mu.Unlock()
+		<-m.sem
 	}()
 
 	slog.Info("run started", "run_id", r.RunID)

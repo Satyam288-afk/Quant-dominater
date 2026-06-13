@@ -74,7 +74,14 @@ func main() {
 	handler := api.NewHandler(runner, st)
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux, handler)
-	httpHandler := api.RequireServiceAuth(mux, firstEnv("ORCHESTRATOR_AUTH_TOKEN", "SERVICE_AUTH_TOKEN"))
+	authToken := firstEnv("ORCHESTRATOR_AUTH_TOKEN", "SERVICE_AUTH_TOKEN")
+	if authToken == "" {
+		if os.Getenv("REQUIRE_AUTH") == "1" {
+			log.Fatalf("refusing to start: REQUIRE_AUTH=1 but no service auth token set")
+		}
+		log.Printf("WARNING: orchestrator starting WITHOUT service auth — mutating endpoints are open; set SERVICE_AUTH_TOKEN + REQUIRE_AUTH=1 for any shared/demo deployment")
+	}
+	httpHandler := api.RequireServiceAuth(mux, authToken)
 
 	addr := os.Getenv("ORCHESTRATOR_ADDR")
 	if addr == "" {

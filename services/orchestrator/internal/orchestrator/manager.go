@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -126,8 +128,12 @@ func (m *Manager) StartRun(ctx context.Context, runID string) (*model.BenchmarkR
 	m.cancels[run.RunID] = cancel
 	m.mu.Unlock()
 
+	// Snapshot before launching execute(): the goroutine mutates `run` in place
+	// (status transitions, scores, timestamps) while the HTTP handler json-encodes
+	// the returned value — handing back the live pointer is a data race.
+	snapshot := snapshotRun(run)
 	go m.execute(runCtx, run)
-	return run, nil
+	return snapshot, nil
 }
 
 func (m *Manager) StartNextQueued(ctx context.Context) (*model.BenchmarkRun, error) {
@@ -148,8 +154,11 @@ func (m *Manager) StartNextQueued(ctx context.Context) (*model.BenchmarkRun, err
 	m.cancels[run.RunID] = cancel
 	m.mu.Unlock()
 
+	// Snapshot before launching execute() so the caller never observes the live
+	// pointer the run goroutine mutates concurrently (see StartRun).
+	snapshot := snapshotRun(run)
 	go m.execute(runCtx, run)
-	return run, nil
+	return snapshot, nil
 }
 
 func (m *Manager) StartWorker(ctx context.Context, interval time.Duration) {
@@ -257,6 +266,9 @@ func (m *Manager) BenchmarkEndpoint(ctx context.Context, req model.DirectBenchma
 	if endpoint == "" {
 		return nil, errors.New("endpoint_url is required")
 	}
+	if err := validateBenchmarkEndpoint(endpoint); err != nil {
+		return nil, err
+	}
 	if req.BenchmarkSeed == 0 {
 		req.BenchmarkSeed = 42
 	}
@@ -264,7 +276,14 @@ func (m *Manager) BenchmarkEndpoint(ctx context.Context, req model.DirectBenchma
 
 	timeout := m.runTimeout
 	if req.TimeoutSec > 0 {
-		timeout = time.Duration(req.TimeoutSec) * time.Second
+		// Clamp before the time.Second multiply: an unbounded TimeoutSec (e.g.
+		// from a hostile request) overflows int64 nanoseconds and yields a
+		// negative/absurd deadline. maxDurationSec mirrors the load ceilings.
+		sec := req.TimeoutSec
+		if sec > maxDurationSec {
+			sec = maxDurationSec
+		}
+		timeout = time.Duration(sec) * time.Second
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -518,6 +537,65 @@ const (
 	maxDurationSec = 300
 )
 
+// validateBenchmarkEndpoint guards the direct-benchmark path against SSRF: the
+// bot-fleet dials whatever endpoint_url the caller supplies, so an attacker
+// could otherwise point it at loopback/link-local/private/cloud-metadata
+// addresses. We require a ws/wss URL, resolve every IP the host maps to, and
+// reject any that fall in a non-routable/internal range. An optional operator
+// allowlist (ORCHESTRATOR_BENCHMARK_ALLOWED_HOSTS, comma-separated hostnames)
+// short-circuits the IP checks for explicitly trusted targets.
+func validateBenchmarkEndpoint(endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("invalid endpoint_url: %w", err)
+	}
+	if u.Scheme != "ws" && u.Scheme != "wss" {
+		return fmt.Errorf("endpoint_url must use ws:// or wss:// scheme, got %q", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("endpoint_url is missing a host")
+	}
+
+	if allowed := strings.TrimSpace(os.Getenv("ORCHESTRATOR_BENCHMARK_ALLOWED_HOSTS")); allowed != "" {
+		for _, h := range strings.Split(allowed, ",") {
+			if strings.EqualFold(strings.TrimSpace(h), host) {
+				return nil
+			}
+		}
+		return fmt.Errorf("endpoint host %q is not in ORCHESTRATOR_BENCHMARK_ALLOWED_HOSTS", host)
+	}
+
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("could not resolve endpoint host %q: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("endpoint host %q resolved to no addresses", host)
+	}
+	for _, ip := range ips {
+		if isBlockedIP(ip) {
+			return fmt.Errorf("endpoint host %q resolves to a disallowed address %s", host, ip)
+		}
+	}
+	return nil
+}
+
+// isBlockedIP reports whether ip is in a range the benchmark endpoint must not
+// reach: loopback (127/8, ::1), link-local incl. cloud metadata 169.254/16,
+// unspecified, multicast, and RFC1918/ULA private space (10/8, 172.16/12,
+// 192.168/16, fc00::/7).
+func isBlockedIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified() || ip.IsMulticast() || ip.IsPrivate() {
+		return true
+	}
+	return false
+}
+
 func normalizeConfig(config *model.BenchmarkRunConfig) {
 	if config.BotCount <= 0 {
 		config.BotCount = 10
@@ -586,6 +664,25 @@ func mergeResourceSample(artifactDir string, metrics *model.Metrics) {
 		metrics.CPUPctPeak = sample.CPUPctPeak
 		metrics.MemMBPeak = sample.MemMBPeak
 	}
+}
+
+// snapshotRun returns a deep copy of run safe to hand to an HTTP caller while
+// the execute() goroutine keeps mutating the original in place. Mirrors the
+// pointer fields the store's cloneRun copies (Valid, FinishedAt).
+func snapshotRun(run *model.BenchmarkRun) *model.BenchmarkRun {
+	if run == nil {
+		return nil
+	}
+	cp := *run
+	if run.FinishedAt != nil {
+		finishedAt := *run.FinishedAt
+		cp.FinishedAt = &finishedAt
+	}
+	if run.Valid != nil {
+		valid := *run.Valid
+		cp.Valid = &valid
+	}
+	return &cp
 }
 
 func (m *Manager) writeRunSpec(run *model.BenchmarkRun) error {

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	_ "net/http/pprof" // registers /debug/pprof handlers on DefaultServeMux
+	"net/url"
 	"os"
 	"os/signal"
 	"runtime"
@@ -19,6 +20,25 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+)
+
+// Hardening limits. A single misbehaving (or hostile) client must not be able
+// to pin engine memory or drive a quadratic insert.
+const (
+	// maxRestingPerSymbol hard-caps resting orders per side per symbol. The
+	// front-insert in insertSorted is O(n) under the book lock, so an unbounded
+	// book is both an O(n^2) CPU sink and a memory pin; the cap bounds both.
+	// Far above any legitimate book depth (the price-time proof rests at most 2
+	// per side) so it never changes matching/priority behavior in practice.
+	maxRestingPerSymbol = 100_000
+	// maxOrderFieldLen bounds attacker-controlled string fields so a single
+	// huge accepted order cannot rest and pin memory.
+	maxOrderFieldLen = 256
+	// maxRESTBody caps the REST /orders request body (mirrors the WS read limit)
+	// so a giant POST cannot balloon RSS during decode.
+	maxRESTBody = 64 << 10
+	// wsReadLimit caps a single inbound WebSocket message.
+	wsReadLimit = 64 << 10
 )
 
 type BaseMessage struct {
@@ -166,6 +186,20 @@ func (e *Engine) ProcessNew(in NewOrder, owner *Client) (Ack, []FillDelivery) {
 		}, nil
 	}
 
+	// Reject oversized attacker-controlled string fields before they can rest
+	// and pin memory. (WS/REST already bound the whole message, but a single
+	// accepted order with a 256KB symbol could still rest indefinitely.)
+	if len(in.ClientOrderID) > maxOrderFieldLen || len(in.Symbol) > maxOrderFieldLen {
+		return Ack{
+			Type:          "ack",
+			ClientOrderID: in.ClientOrderID,
+			Status:        "rejected",
+			Reason:        "field_too_long",
+			EngineSeq:     e.nextSeq(),
+			TsNs:          nowNs(),
+		}, nil
+	}
+
 	symbol := in.Symbol
 	if symbol == "" {
 		symbol = "DEFAULT"
@@ -202,14 +236,23 @@ func (e *Engine) ProcessNew(in NewOrder, owner *Client) (Ack, []FillDelivery) {
 	if side == "BUY" {
 		deliveries = e.matchBuy(book, active, orderType == "MARKET")
 		if active.Qty > 0 && orderType != "MARKET" {
-			insertSorted(&book.buys, active, true, broken)
-			e.index.Store(active.ID, active)
+			// Cap resting depth: an unbounded book makes the front-insert
+			// quadratic and pins memory. The residual is silently dropped (it
+			// matched as far as it could) and the ack stays "accepted" — the
+			// cap is far above any legitimate depth, so this never fires in the
+			// proof or normal play; only an abusive flood reaches it.
+			if len(book.buys) < maxRestingPerSymbol {
+				insertSorted(&book.buys, active, true, broken)
+				e.index.Store(active.ID, active)
+			}
 		}
 	} else {
 		deliveries = e.matchSell(book, active, orderType == "MARKET")
 		if active.Qty > 0 && orderType != "MARKET" {
-			insertSorted(&book.sells, active, false, broken)
-			e.index.Store(active.ID, active)
+			if len(book.sells) < maxRestingPerSymbol {
+				insertSorted(&book.sells, active, false, broken)
+				e.index.Store(active.ID, active)
+			}
 		}
 	}
 
@@ -515,6 +558,9 @@ func (s *Server) orders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cap the request body so a giant POST cannot balloon RSS during decode.
+	r.Body = http.MaxBytesReader(w, r.Body, maxRESTBody)
+
 	var raw json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -558,20 +604,79 @@ func (s *Server) orders(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// checkOrigin guards the WebSocket upgrade against cross-site hijacking while
+// keeping the demo and the bot-fleet working. A missing/empty Origin (non-
+// browser clients such as the bot-fleet send none) is allowed; a present Origin
+// must parse and resolve to a loopback host. This replaces the previous
+// always-true CheckOrigin, which let any website open a socket to a locally
+// running engine.
+func checkOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		// Non-browser clients (the bot-fleet, curl, wscat) send no Origin.
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	return host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
+}
+
 func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("websocket upgrade failed: %v", err)
 		return
 	}
+	// Cap a single inbound frame so a huge message cannot balloon RSS.
+	conn.SetReadLimit(wsReadLimit)
 	client := &Client{conn: conn}
 	defer conn.Close()
+
+	// Idle/dead-connection reaping: a peer that opens the socket and then goes
+	// silent (slowloris) must not hold a goroutine forever. We refresh a read
+	// deadline on every received frame and on every pong; a background ticker
+	// sends pings so a live-but-quiet peer keeps the connection open. If neither
+	// data nor a pong arrives within the deadline, ReadMessage errors and the
+	// loop returns, freeing the goroutine.
+	const (
+		wsPongWait   = 60 * time.Second
+		wsPingPeriod = (wsPongWait * 9) / 10
+	)
+	_ = conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	})
+	pingDone := make(chan struct{})
+	defer close(pingDone)
+	go func() {
+		ticker := time.NewTicker(wsPingPeriod)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				client.mu.Lock()
+				_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				err := conn.WriteMessage(websocket.PingMessage, nil)
+				client.mu.Unlock()
+				if err != nil {
+					return
+				}
+			case <-pingDone:
+				return
+			}
+		}
+	}()
 
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
 			return
 		}
+		// A data frame proves liveness; extend the read deadline.
+		_ = conn.SetReadDeadline(time.Now().Add(wsPongWait))
 		// Guard BEFORE boxing: json.RawMessage(raw) into `any` is an
 		// allocation per inbound message that --events "" runs must not pay.
 		if s.logger != nil {
@@ -756,7 +861,7 @@ func main() {
 	server := &Server{
 		logger: logger,
 		upgrader: websocket.Upgrader{
-			CheckOrigin: func(_ *http.Request) bool { return true },
+			CheckOrigin: checkOrigin,
 		},
 	}
 	switch *engineKind {
@@ -780,7 +885,18 @@ func main() {
 	mux.HandleFunc("/orders", server.orders)
 	mux.HandleFunc("/ws", server.ws)
 
-	srv := &http.Server{Addr: *addr, Handler: mux}
+	// Timeouts bound slow/idle connections so a slowloris flood cannot pin one
+	// goroutine per stalled connection. WriteTimeout is intentionally left zero:
+	// the /ws handler hijacks the connection and manages its own read/write
+	// deadlines (see ws()), and a server-wide WriteTimeout would kill long-lived
+	// WebSocket sessions.
+	srv := &http.Server{
+		Addr:              *addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	go func() {
 		log.Printf("stub engine listening on %s mode=%s engine=%s", *addr, *mode, *engineKind)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

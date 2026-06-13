@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,14 +31,29 @@ type ArtifactStore interface {
 }
 
 type Handler struct {
-	store     SubmissionStore
-	artifacts ArtifactStore
+	store      SubmissionStore
+	artifacts  ArtifactStore
+	uploadSlot chan struct{}
 }
 
-const maxSubmissionBytes = 64 << 20
+const (
+	// Hard ceiling on the total request body for an artifact upload.
+	maxSubmissionBytes = 64 << 20
+	// In-memory buffer used by ParseMultipartForm; parts larger than this spill
+	// to temp files on disk instead of being held in RAM. Keep this small so a
+	// 64MiB upload does not buffer near-fully in memory.
+	maxSubmissionMemory = 1 << 20
+	// Cap on concurrent in-flight artifact uploads to bound peak memory/disk/FD
+	// pressure when many large submissions arrive at once.
+	maxConcurrentSubmissions = 8
+)
 
 func NewHandler(store SubmissionStore, artifacts ArtifactStore) *Handler {
-	return &Handler{store: store, artifacts: artifacts}
+	return &Handler{
+		store:      store,
+		artifacts:  artifacts,
+		uploadSlot: make(chan struct{}, maxConcurrentSubmissions),
+	}
 }
 
 func (h *Handler) Health(w http.ResponseWriter, _ *http.Request) {
@@ -44,8 +61,18 @@ func (h *Handler) Health(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (h *Handler) CreateSubmission(w http.ResponseWriter, r *http.Request) {
+	// Bound concurrent uploads so a burst of large submissions cannot exhaust
+	// host memory/disk/FDs. Reject (rather than queue) once the pool is full.
+	select {
+	case h.uploadSlot <- struct{}{}:
+		defer func() { <-h.uploadSlot }()
+	default:
+		writeError(w, http.StatusServiceUnavailable, "too many concurrent submissions; retry shortly")
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, maxSubmissionBytes)
-	if err := r.ParseMultipartForm(maxSubmissionBytes); err != nil {
+	if err := r.ParseMultipartForm(maxSubmissionMemory); err != nil {
 		writeError(w, http.StatusBadRequest, "expected multipart/form-data with artifact file")
 		return
 	}
@@ -70,7 +97,7 @@ func (h *Handler) CreateSubmission(w http.ResponseWriter, r *http.Request) {
 	protocol := defaultString(r.FormValue("protocol"), "ws-json")
 
 	now := time.Now()
-	submissionID := fmt.Sprintf("sub_%d", now.UnixNano())
+	submissionID := uniqueID("sub", now)
 	artifact, err := h.artifacts.Save(r.Context(), submissionID, fileHeader)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -123,6 +150,9 @@ func (h *Handler) CreateRun(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		defer r.Body.Close()
 		if r.ContentLength != 0 {
+			// Cap the run-config JSON body; it is a tiny document, so 64KiB is
+			// generous while preventing an unbounded read into memory.
+			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				writeError(w, http.StatusBadRequest, "invalid json")
 				return
@@ -133,7 +163,7 @@ func (h *Handler) CreateRun(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	run := &model.BenchmarkRun{
-		RunID:         fmt.Sprintf("run_%d", now.UnixNano()),
+		RunID:         uniqueID("run", now),
 		SubmissionID:  submission.SubmissionID,
 		TeamID:        submission.TeamID,
 		Status:        model.RunStatusQueued,
@@ -226,6 +256,20 @@ func handleStoreError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, http.StatusInternalServerError, err.Error())
+}
+
+// uniqueID builds a collision-resistant identifier from a high-resolution
+// timestamp plus a crypto/rand suffix. Two requests minted in the same
+// nanosecond (or on platforms with coarse clock resolution) still get distinct
+// IDs, so concurrent submissions/runs never clobber each other's artifact dir.
+func uniqueID(prefix string, t time.Time) string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// rand.Read should never fail; fall back to the timestamp alone rather
+		// than panic, accepting the (vanishingly small) collision risk.
+		return fmt.Sprintf("%s_%d", prefix, t.UnixNano())
+	}
+	return fmt.Sprintf("%s_%d_%s", prefix, t.UnixNano(), hex.EncodeToString(b[:]))
 }
 
 func defaultString(value string, fallback string) string {

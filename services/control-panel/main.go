@@ -44,12 +44,21 @@ func main() {
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux, handler)
 
+	authToken := firstEnv("CONTROL_PANEL_AUTH_TOKEN", "SERVICE_AUTH_TOKEN")
+	if authToken == "" {
+		if os.Getenv("REQUIRE_AUTH") == "1" {
+			log.Fatalf("refusing to start: REQUIRE_AUTH=1 but no service auth token set")
+		}
+		log.Printf("WARNING: control-panel starting WITHOUT service auth — mutating endpoints are open; set SERVICE_AUTH_TOKEN + REQUIRE_AUTH=1 for any shared/demo deployment")
+	}
+	httpHandler := api.RequireServiceAuth(mux, authToken)
+
 	addr := os.Getenv("CONTROL_PANEL_ADDR")
 	if addr == "" {
 		addr = ":9000"
 	}
 
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{Addr: addr, Handler: httpHandler, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		log.Printf("control panel API listening on %s repo_root=%s", addr, repoRoot)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -67,6 +76,9 @@ func main() {
 	} else {
 		log.Printf("control panel API drained cleanly")
 	}
+	// Cancel any in-flight run goroutines (rooted at context.Background()) so
+	// they unwind and persist a cancelled state instead of being orphaned.
+	manager.Shutdown(shutCtx)
 }
 
 func resolveRepoRoot() (string, error) {
@@ -97,4 +109,13 @@ func resolveRepoRoot() (string, error) {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func firstEnv(names ...string) string {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+	}
+	return ""
 }

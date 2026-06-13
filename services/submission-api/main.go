@@ -33,7 +33,14 @@ func main() {
 
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux, handler)
-	httpHandler := api.RequireAuth(mux, firstEnv("SUBMISSION_API_AUTH_TOKEN", "SERVICE_AUTH_TOKEN"))
+	authToken := firstEnv("SUBMISSION_API_AUTH_TOKEN", "SERVICE_AUTH_TOKEN")
+	if authToken == "" {
+		if os.Getenv("REQUIRE_AUTH") == "1" {
+			log.Fatalf("refusing to start: REQUIRE_AUTH=1 but no service auth token set")
+		}
+		log.Printf("WARNING: submission-api starting WITHOUT service auth — mutating endpoints are open; set SERVICE_AUTH_TOKEN + REQUIRE_AUTH=1 for any shared/demo deployment")
+	}
+	httpHandler := api.RequireAuth(mux, authToken)
 
 	addr := os.Getenv("SUBMISSION_API_ADDR")
 	if addr == "" {

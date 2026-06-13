@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -60,9 +62,15 @@ func main() {
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
+	// Origin allowlist for the /ws upgrade. Default to same-origin + localhost
+	// so the bundled UI works out of the box; LEADERBOARD_WS_ALLOWED_ORIGINS (a
+	// comma-separated list) opens it up for a hosted demo. This replaces the old
+	// unconditional `return true`, which let any site script the socket.
+	allowedOrigins := parseOrigins(os.Getenv("LEADERBOARD_WS_ALLOWED_ORIGINS"))
+
 	handler := &Handler{
 		upgrader: websocket.Upgrader{
-			CheckOrigin: func(*http.Request) bool { return true },
+			CheckOrigin: func(r *http.Request) bool { return originAllowed(r, allowedOrigins) },
 		},
 		rootCtx: rootCtx,
 	}
@@ -115,11 +123,24 @@ func main() {
 		source = "file:" + path
 	}
 
+	// Resolve the service-auth token once so we can fail-closed on startup: an
+	// empty token leaves the mutating /leaderboard/runs route wide open. The
+	// requireServiceAuth middleware keeps its existing empty-token = no-op
+	// behaviour (unit tests / dev scripts depend on it), so this guard is the
+	// only thing that hard-stops a token-less shared/demo deployment.
+	authToken := firstEnv("LEADERBOARD_AUTH_TOKEN", "SERVICE_AUTH_TOKEN")
+	if strings.TrimSpace(authToken) == "" {
+		if os.Getenv("REQUIRE_AUTH") == "1" {
+			log.Fatalf("refusing to start: REQUIRE_AUTH=1 but no service auth token set (LEADERBOARD_AUTH_TOKEN / SERVICE_AUTH_TOKEN)")
+		}
+		log.Printf("WARNING: leaderboard-api starting WITHOUT service auth — mutating endpoints are open; set SERVICE_AUTH_TOKEN + REQUIRE_AUTH=1 for any shared/demo deployment")
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handler.Health)
 	mux.HandleFunc("GET /ready", handler.Ready)
 	mux.HandleFunc("GET /leaderboard", handler.List)
-	mux.HandleFunc("POST /leaderboard/runs", requireServiceAuth(handler.Upsert, firstEnv("LEADERBOARD_AUTH_TOKEN", "SERVICE_AUTH_TOKEN")))
+	mux.HandleFunc("POST /leaderboard/runs", requireServiceAuth(handler.Upsert, authToken))
 	mux.HandleFunc("GET /runs/{id}/live", handler.LiveRun)
 	mux.HandleFunc("GET /runs/{id}/timeseries", handler.RunTimeseries)
 	mux.HandleFunc("GET /ws", handler.WS)
@@ -211,12 +232,26 @@ func (h *Handler) List(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, h.store.List())
 }
 
+// maxUpsertBody caps the POST /leaderboard/runs body so a single request can't
+// stream an unbounded payload into the JSON decoder.
+const maxUpsertBody = 64 << 10 // 64 KiB
+
 func (h *Handler) Upsert(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxUpsertBody)
 	var entry board.Entry
 	if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	// Reject forged / nonsense scores before they reach the store: a NaN or Inf
+	// would corrupt the ZSET ranking, and an absurd magnitude would let a write
+	// pin a team to the top of the board. The legitimate score range is a
+	// bounded composite (0..100-ish), so this clamp is well clear of any real
+	// score while blocking the forgery vector.
+	if math.IsNaN(entry.Score) || math.IsInf(entry.Score, 0) || math.Abs(entry.Score) > 1e9 {
+		writeError(w, http.StatusBadRequest, "score out of range")
 		return
 	}
 	entries, err := h.store.Upsert(entry)
@@ -267,6 +302,17 @@ func (h *Handler) RunTimeseries(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"run_id": runID, "points": points})
 }
 
+// WebSocket keepalive: a dead/idle subscriber that never reads is reaped once
+// its pong stops arriving. We ping every wsPingPeriod and require a pong within
+// wsPongWait; each pong (and the initial deadline) pushes the read deadline
+// forward, so a healthy socket stays open indefinitely while a black-holed one
+// is closed within wsPongWait of going silent.
+const (
+	wsPongWait   = 60 * time.Second
+	wsPingPeriod = (wsPongWait * 9) / 10
+	wsWriteWait  = 10 * time.Second
+)
+
 func (h *Handler) WS(w http.ResponseWriter, r *http.Request) {
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -282,6 +328,26 @@ func (h *Handler) WS(w http.ResponseWriter, r *http.Request) {
 		ctx = context.Background()
 	}
 
+	// Reaper: arm the read deadline and refresh it on every pong. A reader
+	// goroutine is required for gorilla to process control frames (pongs/close);
+	// when the peer goes away it returns and closes the connection, which unblocks
+	// the writer loop below via a failed write / ctx select.
+	_ = conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	})
+	go func() {
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	ping := time.NewTicker(wsPingPeriod)
+	defer ping.Stop()
+
 	// WebSocket connections are hijacked, so srv.Shutdown() does not drain
 	// them — we watch rootCtx ourselves and send a proper Close frame on
 	// shutdown so clients exit cleanly instead of hanging / retry-storming.
@@ -294,10 +360,15 @@ func (h *Handler) WS(w http.ResponseWriter, r *http.Request) {
 				time.Now().Add(time.Second),
 			)
 			return
+		case <-ping.C:
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteWait)); err != nil {
+				return
+			}
 		case payload, ok := <-updates:
 			if !ok {
 				return
 			}
+			_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
 			if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
 				return
 			}
@@ -364,4 +435,45 @@ func firstEnv(names ...string) string {
 		}
 	}
 	return ""
+}
+
+// parseOrigins splits a comma-separated env value into a set of allowed Origin
+// hosts (lower-cased, whitespace trimmed). Empty entries are dropped.
+func parseOrigins(raw string) map[string]struct{} {
+	set := make(map[string]struct{})
+	for _, part := range strings.Split(raw, ",") {
+		if h := strings.ToLower(strings.TrimSpace(part)); h != "" {
+			set[h] = struct{}{}
+		}
+	}
+	return set
+}
+
+// originAllowed gates the WebSocket upgrade. A missing Origin header (non-browser
+// clients such as the score-engine, curl, or k8s probes) is allowed. Browser
+// origins are accepted when same-origin, localhost/127.0.0.1 (any port), or in
+// the operator-supplied allowlist.
+func originAllowed(r *http.Request, allowed map[string]struct{}) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Host) // host:port
+	if host == strings.ToLower(r.Host) {
+		return true
+	}
+	if hostname := strings.ToLower(u.Hostname()); hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1" {
+		return true
+	}
+	if _, ok := allowed[host]; ok {
+		return true
+	}
+	if _, ok := allowed[strings.ToLower(u.Hostname())]; ok {
+		return true
+	}
+	return false
 }

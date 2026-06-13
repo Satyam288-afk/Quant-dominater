@@ -18,6 +18,25 @@ use serde::Serialize;
 /// persistent consumer.
 const DEDUP_WINDOW: usize = 262_144;
 
+/// Hard cap on the number of distinct `run_id`s held live at once. `run_id` is
+/// attacker-controlled (it arrives on every telemetry event), and each new run
+/// allocates a `RunState` (~32 KiB once its dedup/tps buffers warm up). Without
+/// a cap, a flood of distinct run_ids grows `runs` for the pod's whole uptime
+/// and OOMs against the 1Gi limit the dedup window above is already sized for
+/// (50k run_ids alone is ~1.5 GiB). Once the cap is hit we drop+log new
+/// run_ids instead of allocating; existing runs keep working unchanged. Each
+/// admitted RunState eagerly allocates ~256 KiB (a 4096-slot TpsCounter plus
+/// per-bot HDR histograms), so the cap also sets the absolute ceiling: 3000
+/// runs ~= 768 MiB, comfortably under the 1Gi pod budget. A real benchmark
+/// fans out to a handful of runs, far below this.
+const MAX_RUNS: usize = 3000;
+
+/// Per-(run_id) cap on distinct `bot_id`s. `bot_id` is likewise event-supplied,
+/// so an unbounded `bots` map inside a single run is the same OOM vector at one
+/// level down. A real run has a bounded bot fleet; beyond this we drop+log new
+/// bots rather than allocating a `BotState` per attacker-chosen id.
+const MAX_BOTS_PER_RUN: usize = 8192;
+
 /// Per-(run_id) aggregate. Within a run we track per-bot percentiles so
 /// downstream consumers can drill in, plus a roll-up across all bots.
 struct RunState {
@@ -45,6 +64,10 @@ struct RunState {
     /// How many re-delivered duplicates were dropped (surfaced in the summary
     /// so at-least-once re-delivery is observable, not silent).
     duplicates_dropped: u64,
+    /// Events dropped because this run's `bots` map already held
+    /// `MAX_BOTS_PER_RUN` distinct bot_ids (an event-supplied-cardinality OOM
+    /// guard). 0 in the happy path.
+    bots_dropped: u64,
 }
 
 impl RunState {
@@ -59,6 +82,7 @@ impl RunState {
             seen: WindowedDedup::new(DEDUP_WINDOW),
             identity: ahash::RandomState::new(),
             duplicates_dropped: 0,
+            bots_dropped: 0,
         }
     }
 }
@@ -202,6 +226,9 @@ pub struct Aggregator {
     /// to event count, so the interner stays small and the clone is amortised
     /// away.
     interner: Interner,
+    /// Events dropped because `runs` was already at `MAX_RUNS` distinct run_ids
+    /// (the attacker-controlled-cardinality OOM guard). 0 in the happy path.
+    runs_dropped: u64,
 }
 
 impl Aggregator {
@@ -210,6 +237,7 @@ impl Aggregator {
             runs: HashMap::new(),
             filter,
             interner: Interner::default(),
+            runs_dropped: 0,
         }
     }
 
@@ -218,6 +246,23 @@ impl Aggregator {
             if &event.run_id != filter {
                 return;
             }
+        }
+        // Cardinality guard: `run_id` is attacker-controlled, so a flood of
+        // distinct run_ids would otherwise grow `runs` (and the interner)
+        // without bound and OOM the pod. Check the cap BEFORE interning so a
+        // dropped run_id allocates nothing — only run_ids we actually admit
+        // ever touch the interner or the map. `contains_key` accepts a `&str`
+        // because `Arc<str>: Borrow<str>`, so the lookup borrows the event's
+        // existing string instead of allocating a key.
+        if self.runs.len() >= MAX_RUNS && !self.runs.contains_key(event.run_id.as_str()) {
+            self.runs_dropped += 1;
+            tracing::warn!(
+                run_id = %event.run_id,
+                max_runs = MAX_RUNS,
+                runs_dropped = self.runs_dropped,
+                "run_id cardinality cap reached; dropping events for new run_id (possible run_id flood)"
+            );
+            return;
         }
         let run_key = self.interner.intern(&event.run_id);
         let run = self
@@ -251,6 +296,20 @@ impl Aggregator {
         // An ack is one completed transaction; bucket it for peak TPS.
         if event.recv_ts_ns > 0 && matches!(event.event_type, EventKind::AckReceived) {
             run.tps_counter.record(event.recv_ts_ns);
+        }
+        // Same cardinality guard one level down: `bot_id` is event-supplied, so
+        // cap distinct bots per run. Check before interning so a dropped bot_id
+        // allocates nothing (`contains_key` borrows the event's `&str`).
+        if run.bots.len() >= MAX_BOTS_PER_RUN && !run.bots.contains_key(event.bot_id.as_str()) {
+            run.bots_dropped += 1;
+            tracing::warn!(
+                run_id = %event.run_id,
+                bot_id = %event.bot_id,
+                max_bots = MAX_BOTS_PER_RUN,
+                bots_dropped = run.bots_dropped,
+                "bot_id cardinality cap reached for run; dropping events for new bot_id"
+            );
+            return;
         }
         let bot_key = self.interner.intern(&event.bot_id);
         let bot = run.bots.entry(bot_key).or_default();
@@ -536,5 +595,71 @@ mod tests {
         assert_eq!(r.acks_received, 1);
         assert_eq!(r.fills_received, 1_000);
         assert_eq!(r.duplicates_dropped, 1);
+    }
+
+    #[test]
+    fn caps_distinct_run_ids_at_max_runs() {
+        // run_id is attacker-controlled: a flood of distinct run_ids must not
+        // grow the map without bound. Fill exactly to the cap, then prove
+        // further *new* run_ids are dropped (no RunState allocated) while the
+        // already-admitted runs keep accepting events.
+        let mut agg = Aggregator::new(None);
+        for i in 0..MAX_RUNS {
+            agg.record(&evt(&format!("run-{i}"), "b1", EventKind::OrderSent, 0));
+        }
+        assert_eq!(agg.runs.len(), MAX_RUNS);
+        assert_eq!(agg.runs_dropped, 0);
+
+        // New run_ids beyond the cap are dropped: the map does not grow and the
+        // counter increments. No RunState is allocated for them.
+        for i in 0..50 {
+            agg.record(&evt(&format!("overflow-{i}"), "b1", EventKind::OrderSent, 0));
+        }
+        assert_eq!(agg.runs.len(), MAX_RUNS, "map must not grow past the cap");
+        assert_eq!(agg.runs_dropped, 50);
+        assert!(
+            !agg.runs.contains_key("overflow-0"),
+            "dropped run_id must not have been inserted"
+        );
+
+        // An already-admitted run still accepts events after the cap is hit
+        // (existing runs keep working).
+        agg.record(&evt("run-0", "b1", EventKind::AckReceived, 1_000_000));
+        assert_eq!(agg.runs.len(), MAX_RUNS);
+        assert_eq!(agg.runs_dropped, 50, "updating an existing run is not a drop");
+        let summary = agg.finalize();
+        let r = summary
+            .runs
+            .iter()
+            .find(|r| r.run_id == "run-0")
+            .expect("admitted run survives");
+        assert_eq!(r.acks_received, 1);
+    }
+
+    #[test]
+    fn caps_distinct_bots_per_run() {
+        // bot_id is event-supplied too: a single run flooding distinct bot_ids
+        // must not grow its per-run bots map without bound.
+        let mut agg = Aggregator::new(None);
+        for i in 0..MAX_BOTS_PER_RUN {
+            agg.record(&evt("r1", &format!("bot-{i}"), EventKind::OrderSent, 0));
+        }
+        let run = agg.runs.get("r1").expect("run admitted");
+        assert_eq!(run.bots.len(), MAX_BOTS_PER_RUN);
+        assert_eq!(run.bots_dropped, 0);
+
+        for i in 0..25 {
+            agg.record(&evt("r1", &format!("overflow-bot-{i}"), EventKind::OrderSent, 0));
+        }
+        let run = agg.runs.get("r1").expect("run admitted");
+        assert_eq!(run.bots.len(), MAX_BOTS_PER_RUN, "bots map must not grow past the cap");
+        assert_eq!(run.bots_dropped, 25);
+        assert!(!run.bots.contains_key("overflow-bot-0"));
+
+        // An already-admitted bot still accepts events.
+        agg.record(&evt("r1", "bot-0", EventKind::AckReceived, 1_000_000));
+        let run = agg.runs.get("r1").expect("run admitted");
+        assert_eq!(run.bots_dropped, 25);
+        assert_eq!(run.bots.len(), MAX_BOTS_PER_RUN);
     }
 }

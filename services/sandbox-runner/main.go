@@ -33,6 +33,15 @@ func main() {
 	var runner sandbox.Runner
 	switch mode {
 	case "local":
+		// Local mode runs untrusted contestant binaries directly on the host
+		// with no container/cgroup isolation. Refuse to start unless an operator
+		// has explicitly opted in to the unsafe path; the Docker mode is the
+		// isolated, tested path for any shared/judged deployment.
+		if os.Getenv("SANDBOX_ALLOW_UNSAFE_LOCAL") != "1" {
+			log.Fatalf("refusing to start in 'local' mode: it runs untrusted contestant binaries on the host with NO isolation. " +
+				"Use SANDBOX_RUNNER_MODE=docker for any shared/judged deployment, or set SANDBOX_ALLOW_UNSAFE_LOCAL=1 to explicitly opt in (development only).")
+		}
+		log.Printf("WARNING: sandbox runner starting in 'local' mode with SANDBOX_ALLOW_UNSAFE_LOCAL=1 — untrusted contestant binaries run directly on the host with NO isolation; use docker mode for shared/judged deployments")
 		runner = sandbox.NewLocalRunner(repoRoot, runRoot)
 	case "docker":
 		dockerRunner, err := sandbox.NewDockerRunner(repoRoot, runRoot)
@@ -49,7 +58,14 @@ func main() {
 
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux, handler)
-	httpHandler := api.RequireServiceAuth(mux, firstEnv("SANDBOX_RUNNER_AUTH_TOKEN", "SERVICE_AUTH_TOKEN"))
+	token := firstEnv("SANDBOX_RUNNER_AUTH_TOKEN", "SERVICE_AUTH_TOKEN")
+	if token == "" {
+		if os.Getenv("REQUIRE_AUTH") == "1" {
+			log.Fatalf("refusing to start: REQUIRE_AUTH=1 but no service auth token set")
+		}
+		log.Printf("WARNING: sandbox-runner starting WITHOUT service auth — mutating endpoints are open; set SANDBOX_RUNNER_AUTH_TOKEN (or SERVICE_AUTH_TOKEN) + REQUIRE_AUTH=1 for any shared/demo deployment")
+	}
+	httpHandler := api.RequireServiceAuth(mux, token)
 
 	addr := os.Getenv("SANDBOX_RUNNER_ADDR")
 	if addr == "" {

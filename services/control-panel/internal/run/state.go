@@ -10,6 +10,16 @@ const (
 	DefaultSeed         = 42
 )
 
+// Upper bounds on caller-supplied load. Without these, a request could ask for
+// millions of bots/rate/duration and make the control panel spawn a fleet that
+// exhausts host CPU/memory/FDs. The ceilings mirror submission-api and stay well
+// above any real benchmark shape.
+const (
+	maxBotCount     = 5000
+	maxOrdersPerSec = 2000
+	maxDurationSec  = 300
+)
+
 func NormalizeRequest(req RunRequest) (RunRequest, error) {
 	if req.TeamID == "" {
 		req.TeamID = "local"
@@ -36,11 +46,20 @@ func NormalizeRequest(req RunRequest) (RunRequest, error) {
 	if req.BotCount < 1 {
 		return req, errors.New("bot_count must be greater than zero")
 	}
+	if req.BotCount > maxBotCount {
+		req.BotCount = maxBotCount
+	}
 	if req.OrdersPerSec < 1 {
 		return req, errors.New("orders_per_sec must be greater than zero")
 	}
+	if req.OrdersPerSec > maxOrdersPerSec {
+		req.OrdersPerSec = maxOrdersPerSec
+	}
 	if req.DurationSec < 1 {
 		return req, errors.New("duration_sec must be greater than zero")
+	}
+	if req.DurationSec > maxDurationSec {
+		req.DurationSec = maxDurationSec
 	}
 
 	return req, nil

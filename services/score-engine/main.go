@@ -37,11 +37,17 @@ func main() {
 
 	handler := &Handler{runRoot: filepath.Join(repoRoot, ".runs")}
 	authToken := firstEnv("SCORE_ENGINE_AUTH_TOKEN", "SERVICE_AUTH_TOKEN")
+	if strings.TrimSpace(authToken) == "" {
+		if os.Getenv("REQUIRE_AUTH") == "1" {
+			log.Fatalf("refusing to start: REQUIRE_AUTH=1 but no service auth token set")
+		}
+		log.Printf("WARNING: score-engine starting WITHOUT service auth — mutating endpoints are open; set SERVICE_AUTH_TOKEN + REQUIRE_AUTH=1 for any shared/demo deployment")
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handler.Health)
 	mux.HandleFunc("POST /score", requireServiceAuth(handler.Score, authToken))
 	mux.HandleFunc("POST /runs/{run_id}/score", requireServiceAuth(handler.ScoreRun, authToken))
-	mux.HandleFunc("GET /runs/{run_id}/score", handler.GetRunScore)
+	mux.HandleFunc("GET /runs/{run_id}/score", requireServiceAuth(handler.GetRunScore, authToken))
 
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
@@ -70,6 +76,7 @@ func (h *Handler) Health(w http.ResponseWriter, _ *http.Request) {
 func (h *Handler) Score(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	var req scoring.Request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
@@ -97,8 +104,13 @@ func (h *Handler) ScoreRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetRunScore(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("run_id")
+	if runID == "" || filepath.Base(runID) != runID {
+		writeError(w, http.StatusBadRequest, "invalid run_id")
+		return
+	}
 	var result scoring.ScoreResult
-	path := filepath.Join(h.runRoot, r.PathValue("run_id"), "score.json")
+	path := filepath.Join(h.runRoot, runID, "score.json")
 	if err := readJSON(path, &result); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
