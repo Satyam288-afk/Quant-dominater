@@ -60,3 +60,10 @@ web/dist/
 *.swp
 *.swo
 /proj_context
+# Local secrets — NEVER commit (SSH keys, tokens, etc.)
+secrets/
+*.pem
+*.key
+
+# demo upload artifacts
+*.zip
