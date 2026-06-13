@@ -1,6 +1,9 @@
 package scoring
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestScoreCorrectnessGate(t *testing.T) {
 	got := Score(Request{
@@ -111,6 +114,100 @@ func TestResourceScoreMatchesRustCurve(t *testing.T) {
 		if got := resourceScore(c.cpu, c.mem); got != c.want {
 			t.Fatalf("resourceScore(%.0f, %.0f) = %v, want %v", c.cpu, c.mem, got, c.want)
 		}
+	}
+}
+
+// DYN-2: non-finite inputs (NaN/Inf) must never produce a credit. p99=NaN ->
+// latency 0, tps=NaN -> throughput 0, cpu=NaN -> resource neutral 100, mem=NaN
+// -> treated as 0 (no penalty). Guards corrupt/poisoned metrics.
+func TestNaNAndInfGuards(t *testing.T) {
+	nan := math.NaN()
+	inf := math.Inf(1)
+	if got := latencyScore(nan); got != 0 {
+		t.Fatalf("latencyScore(NaN) = %v, want 0", got)
+	}
+	if got := latencyScore(inf); got != 0 {
+		t.Fatalf("latencyScore(+Inf) = %v, want 0", got)
+	}
+	if got := throughputScore(nan, 100); got != 0 {
+		t.Fatalf("throughputScore(NaN) = %v, want 0", got)
+	}
+	if got := throughputScore(inf, 100); got != 0 {
+		t.Fatalf("throughputScore(+Inf) = %v, want 0", got)
+	}
+	if got := resourceScore(nan, 512); got != 100 {
+		t.Fatalf("resourceScore(cpu=NaN) = %v, want 100 (not measured)", got)
+	}
+	// mem=NaN must be treated as 0 -> no penalty, full 100 when cpu under knee.
+	if got := resourceScore(40, nan); got != 100 {
+		t.Fatalf("resourceScore(cpu=40, mem=NaN) = %v, want 100", got)
+	}
+}
+
+// DYN-2 end-to-end: a poisoned p99 (NaN) drops the whole latency term, so the
+// composite cannot inherit a NaN nor bank latency credit.
+func TestScoreGuardsNaNLatency(t *testing.T) {
+	got := Score(Request{
+		RunID:      "run_nan",
+		Config:     BenchmarkRunConfig{BotCount: 10, RatePerBot: 10}, // expected 100
+		Validation: &ValidationResult{Valid: true},
+		Metrics: &Metrics{
+			OrdersSent: 100, Timeouts: 0, ConnectErrors: 0,
+			TPS: 100, P99MS: math.NaN(),
+		},
+	})
+	if got.LatencyScore != 0 {
+		t.Fatalf("latency score = %v, want 0 for NaN p99", got.LatencyScore)
+	}
+	if math.IsNaN(got.Score) {
+		t.Fatal("final score is NaN; NaN must not propagate into the composite")
+	}
+	// 0.40*0 + 0.30*100 + 0.20*100 + 0.10*100 = 60
+	if got.Score != 60 {
+		t.Fatalf("final score = %v, want 60", got.Score)
+	}
+}
+
+// DYN-3: a "1 ack, ignore the rest" engine (1% completion) must not bank near
+// the full 40% latency credit. With a floor-level p99 the raw latency is 100,
+// but completion=0.01 gates it to round2(100*0.01)=1, so the final is ~10.9,
+// nowhere near the ~40+ it would score ungated.
+func TestCompletionGateScalesLatency(t *testing.T) {
+	got := Score(Request{
+		RunID:      "run_gate",
+		Config:     BenchmarkRunConfig{BotCount: 10, RatePerBot: 10}, // expected 100
+		Validation: &ValidationResult{Valid: true},
+		Metrics: &Metrics{
+			OrdersSent: 100, Timeouts: 99, ConnectErrors: 0,
+			TPS: 1, P99MS: 0.05, // floor-level latency -> raw 100 before the gate
+		},
+	})
+	// completion = 1 - 99/100 = 0.01 -> latency 100 gated to round2(100*0.01)=1.
+	if got.LatencyScore != 1 {
+		t.Fatalf("gated latency score = %v, want 1 (100 * 0.01 completion)", got.LatencyScore)
+	}
+	// 0.40*1 + 0.30*1 (tps 1/100) + 0.20*1 (stability) + 0.10*100 (resource) = 10.9.
+	if got.Score != 10.9 {
+		t.Fatalf("final score = %v, want 10.9 (latency gated, not banked)", got.Score)
+	}
+	if got.Score == 50 {
+		t.Fatal("a one-percent-completion engine must not score 50")
+	}
+}
+
+// A healthy engine (completion >= 0.5) must be unchanged by the gate.
+func TestCompletionGateLeavesHealthyEngineUnchanged(t *testing.T) {
+	got := Score(Request{
+		RunID:      "run_ok",
+		Config:     BenchmarkRunConfig{BotCount: 10, RatePerBot: 10},
+		Validation: &ValidationResult{Valid: true},
+		Metrics: &Metrics{
+			OrdersSent: 100, Timeouts: 10, ConnectErrors: 0, // 90% completion
+			TPS: 100, P99MS: 0.05,
+		},
+	})
+	if got.LatencyScore != 100 {
+		t.Fatalf("latency score = %v, want 100 (gate must not touch healthy engines)", got.LatencyScore)
 	}
 }
 

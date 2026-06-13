@@ -51,3 +51,17 @@ GET  /api/leaderboard
 ```
 
 Artifact downloads are restricted to paths under the repo `.runs/` directory.
+
+## Security
+
+This service has no operator auth of its own and attaches `SERVICE_AUTH_TOKEN`
+to every backend call, so it must not be exposed beyond the local operator:
+
+- It binds to `127.0.0.1:9700` by default so it is not reachable from the LAN.
+  Set `CONSOLE_API_ADDR` (e.g. `:9700` / `0.0.0.0:9700`) only when fronting it
+  with real operator authentication.
+- Mutating `POST` routes reject cross-site browser requests (Origin /
+  `Sec-Fetch-Site` allowlist) to blunt drive-by CSRF; same-origin calls from the
+  served UI and non-browser clients (curl) still work.
+
+Production deployments should front this service with real operator auth.

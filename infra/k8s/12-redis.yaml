@@ -36,3 +36,8 @@ spec:
             exec: { command: ["redis-cli", "ping"] }
             initialDelaySeconds: 3
             periodSeconds: 5
+          livenessProbe:
+            exec: { command: ["redis-cli", "ping"] }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3

@@ -83,8 +83,11 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handler.health)
 	mux.HandleFunc("GET /api/health", handler.downstreamHealth)
-	mux.HandleFunc("POST /api/submissions", handler.createSubmission)
-	mux.HandleFunc("POST /api/submissions/{submission_id}/runs", handler.createRun)
+	// Mutating routes are guarded by sameOrigin to blunt drive-by CSRF from a
+	// browser: a cross-site page can POST here, but cannot set a trustworthy
+	// Origin/Sec-Fetch-Site header, so those requests are rejected.
+	mux.HandleFunc("POST /api/submissions", sameOrigin(handler.createSubmission))
+	mux.HandleFunc("POST /api/submissions/{submission_id}/runs", sameOrigin(handler.createRun))
 	mux.HandleFunc("GET /api/runs", handler.listRuns)
 	mux.HandleFunc("GET /api/runs/{run_id}", handler.getRun)
 	mux.HandleFunc("GET /api/runs/{run_id}/artifacts", handler.listArtifacts)
@@ -125,6 +128,52 @@ func limitInFlight(next http.Handler, max int) http.Handler {
 	})
 }
 
+// sameOrigin guards mutating routes against drive-by CSRF from a browser. It
+// rejects requests whose Origin header points at a different host than the one
+// the request was sent to (cross-site), while allowing same-origin browser
+// calls from the served console UI and non-browser clients (curl/tests) that
+// send no Origin header.
+//
+// This is a defense-in-depth measure, not operator auth: production should
+// front this service with real operator authentication.
+func sameOrigin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Prefer the explicit Fetch Metadata signal when the browser sends it.
+		switch r.Header.Get("Sec-Fetch-Site") {
+		case "cross-site":
+			writeError(w, http.StatusForbidden, "cross-site request rejected")
+			return
+		case "same-origin", "same-site", "none":
+			next(w, r)
+			return
+		}
+		// Fall back to the Origin header. Browsers attach it to cross-origin
+		// (and most same-origin) POSTs; non-browser clients usually omit it.
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin == "" {
+			// No Origin: not a browser cross-site request (curl, tests,
+			// same-origin GETs upgraded by some browsers). Allow.
+			next(w, r)
+			return
+		}
+		if originMatchesHost(origin, r.Host) {
+			next(w, r)
+			return
+		}
+		writeError(w, http.StatusForbidden, "cross-origin request rejected")
+	}
+}
+
+// originMatchesHost reports whether the scheme-host[:port] in an Origin header
+// refers to the same host:port the request targeted (r.Host).
+func originMatchesHost(origin string, host string) bool {
+	// Origin is "scheme://host[:port]"; strip the scheme.
+	if i := strings.Index(origin, "://"); i >= 0 {
+		origin = origin[i+3:]
+	}
+	return origin != "" && origin == host
+}
+
 func loadConfig() (Config, error) {
 	repoRoot, err := resolveRepoRoot()
 	if err != nil {
@@ -132,7 +181,13 @@ func loadConfig() (Config, error) {
 	}
 	uiRoot := envPath("CONSOLE_UI_DIR", filepath.Join(repoRoot, "web", "console-ui"))
 	return Config{
-		Addr:              envString("CONSOLE_API_ADDR", ":9700"),
+		// Default to loopback so the console is not reachable from the LAN.
+		// SEC: this service attaches SERVICE_AUTH_TOKEN to every backend call and
+		// has no operator auth of its own, so a LAN-reachable bind would let any
+		// unauthenticated client create+start privileged runs (confused deputy).
+		// Honor an explicit CONSOLE_API_ADDR override (e.g. :9700 / 0.0.0.0:9700)
+		// for container deployments that front it with real operator auth.
+		Addr:              envString("CONSOLE_API_ADDR", "127.0.0.1:9700"),
 		RepoRoot:          repoRoot,
 		UIRoot:            uiRoot,
 		SubmissionURL:     strings.TrimRight(envString("SUBMISSION_API_URL", "http://127.0.0.1:9100"), "/"),

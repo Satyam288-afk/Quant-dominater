@@ -1,4 +1,5 @@
 use std::fmt::Write as _;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bench_core::telemetry::{EventKind, TelemetryEvent};
@@ -6,6 +7,21 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::postgres::PgPoolCopyExt;
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration, MissedTickBehavior};
+
+/// Hard cap on buffered events while the DB is unreachable (R3). On a Timescale
+/// outage `flush` errors and the batch stays buffered; without a cap the buffer
+/// grows with every incoming event until the pod OOMs. Past the cap we
+/// drop-oldest (the freshest events are the most useful for a live view) and
+/// count the drops. ~50 MB of TelemetryEvent at this size — safely under the
+/// pod budget while holding several seconds of peak ingest for a brief blip.
+const MAX_BUFFERED_EVENTS: usize = 500_000;
+
+/// Backoff bounds for retrying COPY after a DB error (R3). On failure we wait
+/// (doubling up to the cap) before the next attempt instead of re-COPYing the
+/// whole buffer on every single push — which was O(n)/event and pinned a CPU
+/// while the DB was down.
+const RETRY_BACKOFF_MIN: Duration = Duration::from_millis(500);
+const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
 /// Spawn the Timescale sink. It owns a connection pool and batches incoming
 /// telemetry events into the metrics_raw hypertable. The summary aggregates
@@ -25,35 +41,82 @@ pub async fn spawn(
         let mut buf: Vec<TelemetryEvent> = Vec::with_capacity(batch_size);
         let mut ticker = interval(Duration::from_millis(flush_ms.max(50)));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        // DB-down state (R3): when the DB is unreachable we back off rather than
+        // retrying the COPY on every push. `retry_after` gates the next attempt;
+        // `backoff` grows on consecutive failures. `events_dropped` counts events
+        // shed by the buffer cap so the loss is observable, not silent.
+        let mut backoff = RETRY_BACKOFF_MIN;
+        let mut retry_after: Option<Instant> = None;
+        let mut events_dropped: u64 = 0;
         loop {
             tokio::select! {
                 maybe = rx.recv() => {
                     match maybe {
                         Some(e) => {
-                            buf.push(e);
-                            if buf.len() >= batch_size {
-                                if let Err(err) = flush(&pool, &mut buf).await {
-                                    tracing::warn!(error=%err, "timescale flush error");
+                            // Buffer cap: drop-oldest past the limit so a DB
+                            // outage can't grow the buffer without bound.
+                            if buf.len() >= MAX_BUFFERED_EVENTS {
+                                buf.remove(0);
+                                events_dropped += 1;
+                                if events_dropped.is_power_of_two() {
+                                    tracing::warn!(
+                                        events_dropped,
+                                        max_buffered = MAX_BUFFERED_EVENTS,
+                                        "timescale buffer full (DB down?); dropping oldest events"
+                                    );
                                 }
+                            }
+                            buf.push(e);
+                            // Only attempt a flush when full AND we're not in a
+                            // backoff window — otherwise we'd re-COPY the whole
+                            // buffer on every push while the DB is down.
+                            let ready = retry_after.map(|t| Instant::now() >= t).unwrap_or(true);
+                            if buf.len() >= batch_size && ready {
+                                try_flush(&pool, &mut buf, &mut backoff, &mut retry_after).await;
                             }
                         }
                         None => break,
                     }
                 }
                 _ = ticker.tick() => {
-                    if !buf.is_empty() {
-                        if let Err(err) = flush(&pool, &mut buf).await {
-                            tracing::warn!(error=%err, "timescale flush error");
-                        }
+                    let ready = retry_after.map(|t| Instant::now() >= t).unwrap_or(true);
+                    if !buf.is_empty() && ready {
+                        try_flush(&pool, &mut buf, &mut backoff, &mut retry_after).await;
                     }
                 }
             }
+        }
+        if events_dropped > 0 {
+            tracing::warn!(events_dropped, "timescale sink shutting down with dropped events");
         }
         if !buf.is_empty() {
             let _ = flush(&pool, &mut buf).await;
         }
     });
     Ok(tx)
+}
+
+/// Attempt one COPY flush, managing the DB-down backoff (R3). On success the
+/// buffer is cleared (inside `flush`) and the backoff resets; on failure the
+/// buffer is RETAINED (so the batch isn't lost) but a backoff timer is armed so
+/// the next attempt waits instead of hammering the DB / re-COPYing per push.
+async fn try_flush(
+    pool: &PgPool,
+    buf: &mut Vec<TelemetryEvent>,
+    backoff: &mut Duration,
+    retry_after: &mut Option<Instant>,
+) {
+    match flush(pool, buf).await {
+        Ok(()) => {
+            *backoff = RETRY_BACKOFF_MIN;
+            *retry_after = None;
+        }
+        Err(err) => {
+            tracing::warn!(error=%err, backoff_ms = backoff.as_millis() as u64, buffered = buf.len(), "timescale flush error; backing off");
+            *retry_after = Some(Instant::now() + *backoff);
+            *backoff = (*backoff * 2).min(RETRY_BACKOFF_MAX);
+        }
+    }
 }
 
 async fn flush(pool: &PgPool, buf: &mut Vec<TelemetryEvent>) -> Result<()> {

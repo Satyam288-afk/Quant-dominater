@@ -1,6 +1,10 @@
 # Leaderboard API: serves the live ranking from Redis and fans it out over
-# WebSocket to the frontend. Horizontally scalable (stateless; reads Redis) and
-# exposed externally via a LoadBalancer for the web UI.
+# WebSocket to the frontend. Horizontally scalable (stateless; reads Redis). The
+# score-write endpoint (POST /leaderboard/runs) is protected by SERVICE_AUTH_TOKEN
+# + REQUIRE_AUTH=1 (fail-closed). The pod is NOT exposed directly to the public
+# internet — leaderboard-api-lb is ClusterIP; put a TLS-terminating, auth-aware
+# Ingress / API gateway in front of it for external web-UI access so the mutating
+# write path can never be reached by an anonymous public POST.
 apiVersion: v1
 kind: Service
 metadata:
@@ -19,7 +23,9 @@ metadata:
   namespace: iicpc
   labels: { app: leaderboard-api }
 spec:
-  type: LoadBalancer
+  # ClusterIP (was LoadBalancer): never expose the score-write endpoint on a raw
+  # public IP. Front this with an auth-aware Ingress / API gateway for the web UI.
+  type: ClusterIP
   selector: { app: leaderboard-api }
   ports:
     - { name: http, port: 80, targetPort: 9500 }
@@ -45,6 +51,10 @@ spec:
           env:
             - { name: REPO_ROOT, value: "/app" }
             - { name: LEADERBOARD_UI_DIR, value: "/app/web/leaderboard-ui" }
+            # Fail-closed auth: the pod refuses to start without a token, so the
+            # POST /leaderboard/runs write path is never anonymously writable.
+            - { name: REQUIRE_AUTH, value: "1" }
+            - { name: SERVICE_AUTH_TOKEN, valueFrom: { secretKeyRef: { name: platform-auth, key: SERVICE_AUTH_TOKEN } } }
           ports:
             - { name: http, containerPort: 9500 }
           resources:
@@ -54,6 +64,11 @@ spec:
             httpGet: { path: /health, port: 9500 }
             initialDelaySeconds: 3
             periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 9500 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler

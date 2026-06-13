@@ -27,6 +27,14 @@ spec:
           resources:
             requests: { cpu: "250m", memory: "256Mi" }
             limits: { cpu: "2", memory: "1Gi" }
+          # The ingester is a headless Kafka consumer (no HTTP listener), so the
+          # liveness signal is "the entrypoint process (PID 1) is still the
+          # ingester". Uses only /bin/sh + grep, present in the debian-slim base.
+          livenessProbe:
+            exec: { command: ["/bin/sh", "-c", "grep -q telemetry-ingester /proc/1/cmdline"] }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            failureThreshold: 3
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler

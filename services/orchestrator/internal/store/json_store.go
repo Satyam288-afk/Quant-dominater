@@ -96,6 +96,17 @@ func (s *JSONStore) SaveRun(_ context.Context, run *model.BenchmarkRun) error {
 	}
 	for idx, existing := range snap.Runs {
 		if existing.RunID == run.RunID {
+			// Terminal-state guard: a cancel and a finish can race (CancelRun
+			// writes CANCELLED while execute()'s happy path writes FINISHED).
+			// The read-modify-write here runs under both s.mu and the
+			// cross-process flock, so the two SaveRuns serialise; the first to
+			// reach a terminal state wins and a later attempt to flip it to a
+			// DIFFERENT terminal state is refused. This keeps the persisted
+			// terminal state deterministic instead of last-write-wins.
+			if model.Terminal(existing.Status) && model.Terminal(run.Status) &&
+				existing.Status != run.Status {
+				return nil
+			}
 			snap.Runs[idx] = cloneRun(run)
 			return s.writeLocked(snap)
 		}

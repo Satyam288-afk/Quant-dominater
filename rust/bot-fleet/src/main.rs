@@ -378,7 +378,14 @@ async fn main() -> Result<()> {
     sink.flush().await.context("telemetry sink flush failed")?;
 
     totals.latencies_ns.sort_unstable();
-    let tps = totals.acks_received as f64 / args.duration_sec.max(1) as f64;
+    // Canonical average TPS (TM-4/TM-5/R5): acks over the OBSERVED span between
+    // the first and last ack, the same definition the aggregator now uses —
+    // not the configured `duration_sec`, which over-counts a run that finished
+    // early or under-counts one that drained past the deadline. With fewer than
+    // 2 acks there is no span to measure, and a sub-second span would make the
+    // rate explode, so in both degenerate cases the divisor floors at 1 second
+    // (a rate over the run window) rather than a pathological sub-second spike.
+    let tps = avg_tps(&totals.ack_recv_ts_ns, totals.acks_received);
     let peak = peak_tps(&mut totals.ack_recv_ts_ns, args.duration_sec);
 
     println!("run_id: {}", args.run_id);
@@ -1163,6 +1170,33 @@ fn merge_stats(total: &mut BotStats, next: BotStats) {
     total.connect_errors += next.connect_errors;
     total.latencies_ns.extend(next.latencies_ns);
     total.ack_recv_ts_ns.extend(next.ack_recv_ts_ns);
+}
+
+/// Average TPS = acks over the observed span (last ack recv − first ack recv).
+/// Canonical definition shared with the aggregator (TM-4/TM-5/R5). With < 2
+/// acks there is no span, and a sub-second span would inflate the rate, so the
+/// divisor floors at 1 second — reporting a rate over the run window rather
+/// than a pathological sub-second spike. Does not require the slice to be
+/// sorted: it scans for the min and max recv stamp.
+fn avg_tps(ack_recv_ts_ns: &[u64], acks_received: u64) -> f64 {
+    if acks_received < 2 {
+        return acks_received as f64;
+    }
+    let (mut lo, mut hi) = (u64::MAX, 0u64);
+    for &ts in ack_recv_ts_ns {
+        if ts < lo {
+            lo = ts;
+        }
+        if ts > hi {
+            hi = ts;
+        }
+    }
+    let span_secs = if hi > lo {
+        (hi - lo) as f64 / 1_000_000_000.0
+    } else {
+        0.0
+    };
+    acks_received as f64 / span_secs.max(1.0)
 }
 
 /// Peak TPS = the largest number of acks landing in any aligned 1-second

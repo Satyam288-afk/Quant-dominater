@@ -103,7 +103,9 @@ func (r *DockerRunner) Build(ctx context.Context, req BuildRequest) (_ ImageRef,
 	buildID := fmt.Sprintf("%s_%d", sanitizeDockerTag(req.SubmissionID), time.Now().UnixNano())
 	buildDir := filepath.Join(r.runRoot, "builds", buildID)
 	// Reclaim a failed/oversized build dir (extracted artifact, build context)
-	// so a rejected or broken build does not leak disk on the host.
+	// so a rejected or broken build does not leak disk on the host. The build log
+	// inside buildDir is rescued by retainBuildLog before the build-failure error
+	// returns, so the diagnostic the error points at survives this cleanup.
 	defer func() {
 		if err != nil {
 			_ = os.RemoveAll(buildDir)
@@ -159,12 +161,12 @@ func (r *DockerRunner) Build(ctx context.Context, req BuildRequest) (_ ImageRef,
 	}
 	resp, err := r.cli.ImageBuild(ctx, buildContext, buildOptions)
 	if err != nil {
-		return ImageRef{}, fmt.Errorf("docker image build failed: %w", err)
+		return ImageRef{}, fmt.Errorf("docker image build failed: %w (see %s)", err, retainBuildLog(r.runRoot, buildID, logFile, logPath))
 	}
 	defer resp.Body.Close()
 
 	if err := writeDockerBuildLog(logFile, resp.Body); err != nil {
-		return ImageRef{}, fmt.Errorf("docker image build failed: %w (see %s)", err, logPath)
+		return ImageRef{}, fmt.Errorf("docker image build failed: %w (see %s)", err, retainBuildLog(r.runRoot, buildID, logFile, logPath))
 	}
 
 	image := ImageRef{

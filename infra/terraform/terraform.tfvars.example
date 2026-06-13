@@ -4,6 +4,10 @@ environment     = "dev"
 cluster_name    = "iicpc-benchmark"
 cluster_version = "1.30"
 
+# CIDRs allowed to reach the public EKS API endpoint. Pin to your operator/CI
+# egress IP(s); the module default is a non-open placeholder, never 0.0.0.0/0.
+cluster_public_access_cidrs = ["203.0.113.10/32"] # example — replace
+
 # Scale the platform pool up for heavier load generation.
 platform_instance_types = ["m6i.xlarge"]
 platform_min_size       = 2

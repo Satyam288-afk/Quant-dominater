@@ -237,13 +237,18 @@ func (e *Engine) ProcessNew(in NewOrder, owner *Client) (Ack, []FillDelivery) {
 		deliveries = e.matchBuy(book, active, orderType == "MARKET")
 		if active.Qty > 0 && orderType != "MARKET" {
 			// Cap resting depth: an unbounded book makes the front-insert
-			// quadratic and pins memory. The residual is silently dropped (it
-			// matched as far as it could) and the ack stays "accepted" — the
+			// quadratic and pins memory. The residual matched as far as it
+			// could; if it cannot rest (cap hit), the ack must say "rejected"
+			// (book_full) instead of "accepted" — otherwise a later cancel
+			// returns not_found for an order the ack claimed had rested. The
 			// cap is far above any legitimate depth, so this never fires in the
 			// proof or normal play; only an abusive flood reaches it.
 			if len(book.buys) < maxRestingPerSymbol {
 				insertSorted(&book.buys, active, true, broken)
 				e.index.Store(active.ID, active)
+			} else {
+				ack.Status = "rejected"
+				ack.Reason = "book_full"
 			}
 		}
 	} else {
@@ -252,6 +257,9 @@ func (e *Engine) ProcessNew(in NewOrder, owner *Client) (Ack, []FillDelivery) {
 			if len(book.sells) < maxRestingPerSymbol {
 				insertSorted(&book.sells, active, false, broken)
 				e.index.Store(active.ID, active)
+			} else {
+				ack.Status = "rejected"
+				ack.Reason = "book_full"
 			}
 		}
 	}
@@ -644,6 +652,7 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 	const (
 		wsPongWait   = 60 * time.Second
 		wsPingPeriod = (wsPongWait * 9) / 10
+		wsWriteWait  = 10 * time.Second
 	)
 	_ = conn.SetReadDeadline(time.Now().Add(wsPongWait))
 	conn.SetPongHandler(func(string) error {
@@ -657,11 +666,14 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 		for {
 			select {
 			case <-ticker.C:
-				client.mu.Lock()
-				_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-				err := conn.WriteMessage(websocket.PingMessage, nil)
-				client.mu.Unlock()
-				if err != nil {
+				// WriteControl sets a TRANSIENT deadline for just this ping and
+				// is concurrency-safe with WriteJSON, so it does NOT mutate the
+				// connection's persistent write deadline the way SetWriteDeadline+
+				// WriteMessage did. That stale deadline was being inherited by
+				// every subsequent ack/fill write (which set none of their own),
+				// silently failing all outbound writes after ~wsWriteWait on long
+				// runs. (Mirrors services/leaderboard-api/main.go.)
+				if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteWait)); err != nil {
 					return
 				}
 			case <-pingDone:

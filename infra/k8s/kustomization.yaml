@@ -10,6 +10,7 @@ resources:
   - 00-namespaces.yaml
   - 01-config.yaml
   - 02-rbac.yaml
+  - 03-platform-secret.yaml
   - 10-redpanda.yaml
   - 11-timescaledb.yaml
   - 12-redis.yaml

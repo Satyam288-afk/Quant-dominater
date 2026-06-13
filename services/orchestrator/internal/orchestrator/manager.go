@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -419,13 +420,21 @@ func (m *Manager) execute(ctx context.Context, run *model.BenchmarkRun) {
 		m.fail(ctx, run, "SANDBOX_STARTING", err)
 		return
 	}
-	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if err := handle.Stop(cleanupCtx); err != nil {
-			_ = appendRunLog(run, "engine cleanup failed: "+err.Error())
-		}
-	}()
+	// stopEngine tears down the contestant engine and flushes the sandbox's
+	// final, TRUSTED resource sample. sync.Once makes it safe to call both on
+	// the post-benchmark happy path (so the engine is dead before we read
+	// resource.json) and again from the cleanup defer below (idempotent no-op).
+	var stopOnce sync.Once
+	stopEngine := func() {
+		stopOnce.Do(func() {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := handle.Stop(cleanupCtx); err != nil {
+				_ = appendRunLog(run, "engine cleanup failed: "+err.Error())
+			}
+		})
+	}
+	defer stopEngine()
 
 	run.Config.EngineEndpoint = handle.Endpoint
 	if err := m.transition(ctx, run, model.RunStatusHealthChecking); err != nil {
@@ -442,6 +451,13 @@ func (m *Manager) execute(ctx context.Context, run *model.BenchmarkRun) {
 		m.fail(ctx, run, "BENCHMARKING", err)
 		return
 	}
+	// Stop the engine BEFORE reading resource.json. The sandbox writes its
+	// authoritative post-process resource sample on stop, and stopping also
+	// kills the contestant process so it can't win a later write. In local
+	// mode the engine is unsandboxed and free to write resource.json itself,
+	// so this stop-ordering (dead engine -> trusted sample is the last write,
+	// then we read) is the effective protection against a forged sample.
+	stopEngine()
 	mergeResourceSample(run.ArtifactDir, metrics)
 
 	if err := m.transition(ctx, run, model.RunStatusValidating); err != nil {
@@ -465,6 +481,17 @@ func (m *Manager) execute(ctx context.Context, run *model.BenchmarkRun) {
 		return
 	}
 	run.Score = score.Score
+
+	// Recheck cancellation/timeout before committing FINISHED. CancelRun can
+	// fire concurrently and persist CANCELLED; without this recheck the happy
+	// path would race it to a nondeterministic terminal state. If the run was
+	// cancelled/timed out, route through fail() so the in-memory run and the
+	// store agree on the terminal state. (The store's terminal-state guard is
+	// the backstop if the cancel lands after this check.)
+	if err := ctx.Err(); err != nil {
+		m.fail(ctx, run, "SCORING", err)
+		return
+	}
 
 	now := time.Now()
 	run.Status = model.RunStatusFinished
@@ -647,7 +674,9 @@ func (m *Manager) fail(ctx context.Context, run *model.BenchmarkRun, stage strin
 // the contestant engine, written into the artifact dir by the sandbox sampler)
 // into the metrics so the scorer's 10% resource term is real. Absent or
 // unparseable -> left at zero, which the scorer treats as neutral (100), so a
-// missing sample never penalises an engine.
+// missing sample never penalises an engine. Values that are NaN/Inf/negative
+// are likewise rejected (left neutral) so a forged or corrupt sample can't feed
+// the scorer a flattering or absurd resource term.
 func mergeResourceSample(artifactDir string, metrics *model.Metrics) {
 	if metrics == nil || artifactDir == "" {
 		return
@@ -660,10 +689,20 @@ func mergeResourceSample(artifactDir string, metrics *model.Metrics) {
 		CPUPctPeak float64 `json:"cpu_pct_peak"`
 		MemMBPeak  float64 `json:"mem_mb_peak"`
 	}
-	if json.Unmarshal(data, &sample) == nil {
+	if json.Unmarshal(data, &sample) != nil {
+		return
+	}
+	if validResourceValue(sample.CPUPctPeak) && validResourceValue(sample.MemMBPeak) {
 		metrics.CPUPctPeak = sample.CPUPctPeak
 		metrics.MemMBPeak = sample.MemMBPeak
 	}
+}
+
+// validResourceValue rejects NaN, +/-Inf and negative resource readings. Zero
+// stays valid: the scorer treats a zero sample as neutral (100), matching the
+// missing-sample behaviour.
+func validResourceValue(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0
 }
 
 // snapshotRun returns a deep copy of run safe to hand to an HTTP caller while

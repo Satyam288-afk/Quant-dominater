@@ -48,6 +48,11 @@ spec:
             httpGet: { path: /health, port: 9200 }
             initialDelaySeconds: 3
             periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 9200 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
           volumeMounts:
             - { name: artifacts, mountPath: /data }
       volumes:

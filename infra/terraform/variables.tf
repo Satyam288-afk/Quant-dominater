@@ -28,6 +28,18 @@ variable "vpc_cidr" {
   default     = "10.42.0.0/16"
 }
 
+variable "cluster_public_access_cidrs" {
+  description = <<-EOT
+    CIDRs allowed to reach the EKS public API endpoint. Defaults to a
+    NON-open placeholder (TEST-NET documentation block) so the endpoint is
+    never inadvertently exposed to 0.0.0.0/0. PIN THIS to the operator /
+    CI egress CIDR(s) before deploying, or set cluster_endpoint_public_access
+    = false and reach the API over the private endpoint / a bastion.
+  EOT
+  type        = list(string)
+  default     = ["192.0.2.0/24"] # RFC 5737 TEST-NET-1 placeholder — override me
+}
+
 variable "platform_instance_types" {
   description = "Instance types for the general platform node group (control + data plane, bot fleet, ingester)."
   type        = list(string)

@@ -91,10 +91,26 @@ func (h *Handler) Score(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// safeRunID extracts run_id from the path and rejects anything that isn't a
+// single path segment (empty, "..", or containing a separator), so it can never
+// escape h.runRoot via filepath.Join. Returns ok=false after writing a 400.
+func safeRunID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	runID := r.PathValue("run_id")
+	if runID == "" || filepath.Base(runID) != runID {
+		writeError(w, http.StatusBadRequest, "invalid run_id")
+		return "", false
+	}
+	return runID, true
+}
+
 func (h *Handler) ScoreRun(w http.ResponseWriter, r *http.Request) {
+	runID, ok := safeRunID(w, r)
+	if !ok {
+		return
+	}
 	result, err := h.scoreRequest(scoring.Request{
-		RunID:       r.PathValue("run_id"),
-		ArtifactDir: filepath.Join(h.runRoot, r.PathValue("run_id")),
+		RunID:       runID,
+		ArtifactDir: filepath.Join(h.runRoot, runID),
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -104,9 +120,8 @@ func (h *Handler) ScoreRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetRunScore(w http.ResponseWriter, r *http.Request) {
-	runID := r.PathValue("run_id")
-	if runID == "" || filepath.Base(runID) != runID {
-		writeError(w, http.StatusBadRequest, "invalid run_id")
+	runID, ok := safeRunID(w, r)
+	if !ok {
 		return
 	}
 	var result scoring.ScoreResult

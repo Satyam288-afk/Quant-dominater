@@ -28,8 +28,10 @@ const DEDUP_WINDOW: usize = 262_144;
 /// admitted RunState eagerly allocates ~256 KiB (a 4096-slot TpsCounter plus
 /// per-bot HDR histograms), so the cap also sets the absolute ceiling: 3000
 /// runs ~= 768 MiB, comfortably under the 1Gi pod budget. A real benchmark
-/// fans out to a handful of runs, far below this.
-const MAX_RUNS: usize = 3000;
+/// fans out to a handful of runs, far below this. Also reused by the redis sink
+/// to bound its own per-run rollup map (the same attacker-controlled-run_id OOM
+/// vector one layer down).
+pub const MAX_RUNS: usize = 3000;
 
 /// Per-(run_id) cap on distinct `bot_id`s. `bot_id` is likewise event-supplied,
 /// so an unbounded `bots` map inside a single run is the same OOM vector at one
@@ -328,12 +330,14 @@ impl Aggregator {
     }
 
     pub fn finalize(self) -> RunSummary {
+        let runs_dropped = self.runs_dropped;
         let mut runs = Vec::with_capacity(self.runs.len());
         for (run_id, state) in self.runs.into_iter() {
             let duration_ns = state.last_ts_ns.saturating_sub(state.first_ts_ns);
-            let duration_secs = (duration_ns as f64 / 1_000_000_000.0).max(0.001);
+            let duration_secs = duration_ns as f64 / 1_000_000_000.0;
             let peak_tps = state.tps_counter.peak_tps() as f64;
             let duplicates_dropped = state.duplicates_dropped;
+            let bots_dropped = state.bots_dropped;
 
             let mut totals = BotTotals::default();
             let mut bots: Vec<BotSummary> = Vec::with_capacity(state.bots.len());
@@ -369,6 +373,19 @@ impl Aggregator {
             // the authoritative quantiles from Timescale.
             let (p50, p90, p99, p999) = approx_global_percentiles(&bots);
 
+            // Canonical average TPS (TM-4/TM-5/R5): acks over the OBSERVED span
+            // (last_ack - first_ack), which is the same definition the bot-fleet
+            // summary now uses. With fewer than 2 acks there is no span to
+            // measure, and a sub-second span makes the rate explode (the old
+            // `.max(0.001)` floor turned a single ack into 1000 TPS). In both
+            // degenerate cases we floor the divisor at 1 second so the figure is
+            // a rate over the run window, not a pathological 1 ms-window spike.
+            let tps_divisor = if totals.acks_received >= 2 {
+                duration_secs.max(1.0)
+            } else {
+                1.0
+            };
+
             runs.push(RunAggregate {
                 run_id: run_id.to_string(),
                 duration_secs,
@@ -377,18 +394,22 @@ impl Aggregator {
                 fills_received: totals.fills_received,
                 timeouts: totals.timeouts,
                 errors: totals.errors,
-                tps: totals.acks_received as f64 / duration_secs,
+                tps: totals.acks_received as f64 / tps_divisor,
                 peak_tps,
                 p50_ms: p50,
                 p90_ms: p90,
                 p99_ms: p99,
                 p999_ms: p999,
                 duplicates_dropped,
+                bots_dropped,
                 bots,
             });
         }
         runs.sort_by(|a, b| a.run_id.cmp(&b.run_id));
-        RunSummary { runs }
+        RunSummary {
+            runs,
+            runs_dropped,
+        }
     }
 }
 
@@ -429,6 +450,10 @@ fn approx_global_percentiles(bots: &[BotSummary]) -> (f64, f64, f64, f64) {
 #[derive(Debug, Serialize)]
 pub struct RunSummary {
     pub runs: Vec<RunAggregate>,
+    /// Events dropped because `runs` was already at `MAX_RUNS` distinct run_ids
+    /// (the attacker-controlled-cardinality OOM guard). 0 in the happy path;
+    /// surfaced so the cap is observable rather than only log-warned.
+    pub runs_dropped: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -450,6 +475,10 @@ pub struct RunAggregate {
     /// happy path; non-zero after an ingester restart re-reads committed-but-
     /// reprocessed offsets — proof the dedup is doing its job.
     pub duplicates_dropped: u64,
+    /// Events dropped because this run's `bots` map was already at
+    /// `MAX_BOTS_PER_RUN` distinct bot_ids (the per-run cardinality OOM guard).
+    /// 0 in the happy path; surfaced so the cap is observable, not only logged.
+    pub bots_dropped: u64,
     pub bots: Vec<BotSummary>,
 }
 
@@ -628,6 +657,8 @@ mod tests {
         assert_eq!(agg.runs.len(), MAX_RUNS);
         assert_eq!(agg.runs_dropped, 50, "updating an existing run is not a drop");
         let summary = agg.finalize();
+        // The drop count is surfaced in the summary (TM-3), not only log-warned.
+        assert_eq!(summary.runs_dropped, 50);
         let r = summary
             .runs
             .iter()
@@ -661,5 +692,15 @@ mod tests {
         let run = agg.runs.get("r1").expect("run admitted");
         assert_eq!(run.bots_dropped, 25);
         assert_eq!(run.bots.len(), MAX_BOTS_PER_RUN);
+
+        // The per-run drop count is surfaced in the summary (TM-3), not only
+        // log-warned.
+        let summary = agg.finalize();
+        let r = summary
+            .runs
+            .iter()
+            .find(|r| r.run_id == "r1")
+            .expect("run survives");
+        assert_eq!(r.bots_dropped, 25);
     }
 }

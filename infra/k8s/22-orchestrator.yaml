@@ -34,6 +34,11 @@ spec:
             - { name: ORCHESTRATOR_ADDR, value: ":9300" }
             - { name: SANDBOX_RUNNER_URL, value: "http://sandbox-runner.iicpc.svc.cluster.local:9200" }
             - { name: SUBMISSION_API_URL, value: "http://submission-api.iicpc.svc.cluster.local:9100" }
+            # The orchestrator both serves an auth-gated API and POSTs scores to
+            # the leaderboard; it must present the SAME shared token the
+            # leaderboard-api requires.
+            - { name: REQUIRE_AUTH, value: "1" }
+            - { name: SERVICE_AUTH_TOKEN, valueFrom: { secretKeyRef: { name: platform-auth, key: SERVICE_AUTH_TOKEN } } }
           ports:
             - { name: http, containerPort: 9300 }
           resources:
@@ -43,3 +48,8 @@ spec:
             httpGet: { path: /health, port: 9300 }
             initialDelaySeconds: 3
             periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 9300 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3

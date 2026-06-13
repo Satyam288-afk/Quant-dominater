@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -80,8 +81,11 @@ func (r *LocalRunner) Build(ctx context.Context, req BuildRequest) (_ ImageRef, 
 
 	buildID := fmt.Sprintf("%s_%d", sanitizeDockerTag(req.SubmissionID), time.Now().UnixNano())
 	buildDir := filepath.Join(r.runRoot, "builds", buildID)
+	logPath := filepath.Join(buildDir, "local-build.log")
 	// Reclaim a failed/oversized build dir (extracted artifact, partial binary)
-	// so a rejected or broken build does not leak disk on the host.
+	// so a rejected or broken build does not leak disk on the host. The build log
+	// inside buildDir is rescued by retainBuildLog (below) before the build-step
+	// errors return, so the diagnostic the error points at survives this cleanup.
 	defer func() {
 		if err != nil {
 			_ = os.RemoveAll(buildDir)
@@ -91,7 +95,7 @@ func (r *LocalRunner) Build(ctx context.Context, req BuildRequest) (_ ImageRef, 
 		return ImageRef{}, err
 	}
 
-	logFile, err := os.OpenFile(filepath.Join(buildDir, "local-build.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return ImageRef{}, err
 	}
@@ -99,15 +103,15 @@ func (r *LocalRunner) Build(ctx context.Context, req BuildRequest) (_ ImageRef, 
 
 	if fileExists(filepath.Join(buildDir, "go.mod")) {
 		_, _ = fmt.Fprintf(logFile, "$ (cd %s && go mod tidy)\n", buildDir)
-		if err := runBuildStep(ctx, buildDir, logFile, "go", "mod", "tidy"); err != nil {
-			return ImageRef{}, fmt.Errorf("go mod tidy: %w", err)
+		if stepErr := runBuildStep(ctx, buildDir, logFile, "go", "mod", "tidy"); stepErr != nil {
+			return ImageRef{}, fmt.Errorf("go mod tidy: %w (see %s)", stepErr, retainBuildLog(r.runRoot, buildID, logFile, logPath))
 		}
 	}
 
 	binaryPath := filepath.Join(buildDir, "engine")
 	_, _ = fmt.Fprintf(logFile, "$ (cd %s && go build -o %s .)\n", buildDir, binaryPath)
-	if err := runBuildStep(ctx, buildDir, logFile, "go", "build", "-o", binaryPath, "."); err != nil {
-		return ImageRef{}, fmt.Errorf("go build: %w", err)
+	if stepErr := runBuildStep(ctx, buildDir, logFile, "go", "build", "-o", binaryPath, "."); stepErr != nil {
+		return ImageRef{}, fmt.Errorf("go build: %w (see %s)", stepErr, retainBuildLog(r.runRoot, buildID, logFile, logPath))
 	}
 
 	image := ImageRef{
@@ -130,10 +134,78 @@ func (r *LocalRunner) Build(ctx context.Context, req BuildRequest) (_ ImageRef, 
 	return image, nil
 }
 
+// retainBuildLog copies a failed build's log out of buildDir (which the
+// deferred cleanup is about to os.RemoveAll) into a sibling diagnostics dir that
+// survives, so the path the returned error points at still exists for the
+// operator to read. It returns the retained path on success, or falls back to
+// the original in-buildDir path if the rescue copy fails (the error message is
+// still useful even if the file is later reclaimed).
+func retainBuildLog(runRoot string, buildID string, logFile *os.File, logPath string) string {
+	// Flush any buffered writes to disk before copying. *os.File writes are
+	// unbuffered, but Sync guards against a partially-flushed final write.
+	if logFile != nil {
+		_ = logFile.Sync()
+	}
+	diagDir := filepath.Join(runRoot, "build-failures", buildID)
+	if err := os.MkdirAll(diagDir, 0o755); err != nil {
+		return logPath
+	}
+	diagPath := filepath.Join(diagDir, filepath.Base(logPath))
+	if err := copyFile(logPath, diagPath); err != nil {
+		return logPath
+	}
+	return diagPath
+}
+
 // buildStepTimeout bounds each compile/dependency step. Untrusted contestant
 // code is being built on the host in local mode; a pathological source or a
 // dependency-resolution hang must not wedge a build worker forever.
 const buildStepTimeout = 120 * time.Second
+
+// allowlistEnv builds a minimal process environment for untrusted contestant
+// code instead of inheriting the runner's full os.Environ(). In local mode the
+// runner process holds the master SERVICE_AUTH_TOKEN in its environment; passing
+// os.Environ() to a contestant build/run would hand that credential straight to
+// attacker-controlled code. We copy ONLY the named, non-secret variables that
+// are actually present, then defensively drop anything that looks like an auth
+// token in case a future name slips into the allowlist.
+func allowlistEnv(names ...string) []string {
+	env := make([]string, 0, len(names))
+	for _, name := range names {
+		if isAuthSecretEnv(name) {
+			continue
+		}
+		if value, ok := os.LookupEnv(name); ok {
+			env = append(env, name+"="+value)
+		}
+	}
+	return env
+}
+
+// isAuthSecretEnv reports whether an env var name names a credential that must
+// never reach untrusted contestant code (e.g. SERVICE_AUTH_TOKEN, REQUIRE_AUTH).
+func isAuthSecretEnv(name string) bool {
+	upper := strings.ToUpper(name)
+	return strings.Contains(upper, "AUTH_TOKEN") || upper == "REQUIRE_AUTH"
+}
+
+// buildEnvAllowlist is the env passed to the contestant build (go mod tidy / go
+// build). The GO* vars are required for the toolchain to find its cache, module
+// download dir, and proxy/network settings; CGO is force-disabled. Secrets such
+// as SERVICE_AUTH_TOKEN are deliberately excluded.
+func buildEnvAllowlist() []string {
+	env := allowlistEnv(
+		"PATH", "HOME",
+		"GOCACHE", "GOPATH", "GOMODCACHE", "GOPROXY", "GOFLAGS", "GO111MODULE",
+	)
+	return append(env, "CGO_ENABLED=0")
+}
+
+// runEnvAllowlist is the env passed to the contestant engine process at run
+// time: only PATH and HOME, never the runner's secrets.
+func runEnvAllowlist() []string {
+	return allowlistEnv("PATH", "HOME")
+}
 
 // runBuildStep runs one build command against untrusted contestant code with
 // three guards: a wall-clock timeout; CGO disabled, so a malicious `import "C"`
@@ -149,7 +221,7 @@ func runBuildStep(parent context.Context, dir string, logFile *os.File, name str
 	cmd.Dir = dir
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	cmd.Env = buildEnvAllowlist()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
@@ -228,6 +300,10 @@ func (r *LocalRunner) Start(ctx context.Context, req StartRequest) (SandboxHandl
 	cmd.Dir = image.buildDir
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	// Run the untrusted engine with a minimal env (no os.Environ()): the runner
+	// process holds SERVICE_AUTH_TOKEN in local mode, and inheriting it would
+	// hand the master credential to contestant code.
+	cmd.Env = runEnvAllowlist()
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
 		return SandboxHandle{}, err
