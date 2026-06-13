@@ -1,0 +1,26 @@
+# Fly.io deploy of the single-container console stack.
+# Rename `app`, then: fly launch --no-deploy (or `fly apps create`), fly deploy.
+# A SERVICE_AUTH_TOKEN is auto-generated inside the container if not set; to pin
+# one: `fly secrets set SERVICE_AUTH_TOKEN=$(openssl rand -hex 32)`.
+app = "quant-dominator-demo"
+primary_region = "iad"
+
+[build]
+  dockerfile = "infra/deploy/Dockerfile"
+
+[env]
+  PORT = "8080"
+  # REQUIRE_AUTH=1 and SANDBOX_ALLOW_UNSAFE_LOCAL=1 are baked into the image.
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+# The evaluator builds + runs the uploaded engine in-container: give it headroom.
+# 512MB can OOM during the Go build spike; 1GB is comfortable.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

@@ -1,0 +1,20 @@
+# Render.com Blueprint for the single-container console stack.
+# In Render: New + > Blueprint > point at this repo; it reads this file.
+# NOTE: the evaluator builds + runs the uploaded engine in-container, which
+# spikes memory during `go build` — the 512MB free/starter plans can OOM.
+# Use `standard` (2GB) for a reliable demo, or accept occasional OOM on free.
+services:
+  - type: web
+    name: quant-dominator-demo
+    runtime: docker
+    dockerfilePath: ./infra/deploy/Dockerfile
+    dockerContext: .
+    plan: standard          # 2GB; downgrade to `free`/`starter` (512MB) at your own risk
+    healthCheckPath: /
+    autoDeploy: false
+    envVars:
+      - key: PORT
+        value: "8080"
+      - key: SERVICE_AUTH_TOKEN   # fail-closed backends require it; Render generates a secret
+        generateValue: true
+      # REQUIRE_AUTH=1 and SANDBOX_ALLOW_UNSAFE_LOCAL=1 are baked into the image.
