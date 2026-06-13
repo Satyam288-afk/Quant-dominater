@@ -318,7 +318,10 @@ func freePort() (int, error) {
 
 func waitForHealth(ctx context.Context, url string) error {
 	client := &http.Client{Timeout: 500 * time.Millisecond}
-	deadline := time.NewTimer(10 * time.Second)
+	// 45s, not 10s: on Docker Desktop the port-forward proxy can take several
+	// seconds to start answering on the mapped port even after the engine has
+	// booted. The caller's context still bounds the overall wait.
+	deadline := time.NewTimer(45 * time.Second)
 	defer deadline.Stop()
 
 	ticker := time.NewTicker(100 * time.Millisecond)

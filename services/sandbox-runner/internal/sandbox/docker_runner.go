@@ -234,7 +234,11 @@ func (r *DockerRunner) Start(ctx context.Context, req StartRequest) (SandboxHand
 		args = append(args, "--mode", req.EngineMode)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Docker Desktop (macOS/Windows LinuxKit VM) is markedly slower than native
+	// Linux for network create + container create/start + port-forward setup, so
+	// give the whole start sequence (create, start, port lookup, health) a
+	// generous budget. The image build has its own separate 10m budget above.
+	ctx, cancel := context.WithTimeout(ctx, 180*time.Second)
 	defer cancel()
 
 	port, err := nat.NewPort("tcp", dockerContainerPort)
@@ -521,11 +525,11 @@ func newDockerClient() (*dockerclient.Client, error) {
 }
 
 func (r *DockerRunner) dockerHostPort(ctx context.Context, containerID string, port nat.Port) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	var lastErr error
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
