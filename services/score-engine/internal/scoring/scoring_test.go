@@ -170,8 +170,8 @@ func TestScoreGuardsNaNLatency(t *testing.T) {
 
 // DYN-3: a "1 ack, ignore the rest" engine (1% completion) must not bank near
 // the full 40% latency credit. With a floor-level p99 the raw latency is 100,
-// but completion=0.01 gates it to round2(100*0.01)=1, so the final is ~10.9,
-// nowhere near the ~40+ it would score ungated.
+// but the continuous ramp factor = min(1, 0.01/0.5) = 0.02 scales it to
+// round2(100*0.02)=2, so the final is ~11.3, nowhere near the ~40+ ungated.
 func TestCompletionGateScalesLatency(t *testing.T) {
 	got := Score(Request{
 		RunID:      "run_gate",
@@ -182,16 +182,45 @@ func TestCompletionGateScalesLatency(t *testing.T) {
 			TPS: 1, P99MS: 0.05, // floor-level latency -> raw 100 before the gate
 		},
 	})
-	// completion = 1 - 99/100 = 0.01 -> latency 100 gated to round2(100*0.01)=1.
-	if got.LatencyScore != 1 {
-		t.Fatalf("gated latency score = %v, want 1 (100 * 0.01 completion)", got.LatencyScore)
+	// completion 0.01 -> factor min(1, 0.01/0.5)=0.02 -> latency round2(100*0.02)=2.
+	if got.LatencyScore != 2 {
+		t.Fatalf("gated latency score = %v, want 2 (100 * 0.02 ramp factor)", got.LatencyScore)
 	}
-	// 0.40*1 + 0.30*1 (tps 1/100) + 0.20*1 (stability) + 0.10*100 (resource) = 10.9.
-	if got.Score != 10.9 {
-		t.Fatalf("final score = %v, want 10.9 (latency gated, not banked)", got.Score)
+	// 0.40*2 + 0.30*1 (tps 1/100) + 0.20*1 (stability) + 0.10*100 (resource) = 11.3.
+	if got.Score != 11.3 {
+		t.Fatalf("final score = %v, want 11.3 (latency gated, not banked)", got.Score)
 	}
 	if got.Score == 50 {
 		t.Fatal("a one-percent-completion engine must not score 50")
+	}
+}
+
+// DYN-3 continuity: the old hard gate produced a ~20-point final-score cliff
+// between completion 0.5 and 0.499 (latency kept 100 at 0.5, dropped to ~49.9
+// just below). The continuous ramp must make 0.5 and 0.499 give nearly-equal
+// final scores so the gate can no longer invert rankings.
+func TestCompletionGateContinuousAtHalf(t *testing.T) {
+	// 1000 orders: 500 timeouts -> completion 0.500; 501 -> completion 0.499.
+	atHalf := Score(Request{
+		RunID:      "run_half",
+		Config:     BenchmarkRunConfig{BotCount: 10, RatePerBot: 10},
+		Validation: &ValidationResult{Valid: true},
+		Metrics: &Metrics{
+			OrdersSent: 1000, Timeouts: 500, ConnectErrors: 0,
+			TPS: 100, P99MS: 0.05,
+		},
+	})
+	justBelow := Score(Request{
+		RunID:      "run_below",
+		Config:     BenchmarkRunConfig{BotCount: 10, RatePerBot: 10},
+		Validation: &ValidationResult{Valid: true},
+		Metrics: &Metrics{
+			OrdersSent: 1000, Timeouts: 501, ConnectErrors: 0,
+			TPS: 100, P99MS: 0.05,
+		},
+	})
+	if d := math.Abs(atHalf.Score - justBelow.Score); d >= 0.1 {
+		t.Fatalf("expected continuity at completion=0.5: %v vs %v (diff %v)", atHalf.Score, justBelow.Score, d)
 	}
 }
 

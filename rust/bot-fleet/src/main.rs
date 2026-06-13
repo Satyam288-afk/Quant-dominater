@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fs::File,
     io::{BufWriter, Write},
     path::PathBuf,
@@ -255,8 +255,8 @@ async fn main() -> Result<()> {
 
     let sink: Arc<dyn TelemetrySink> = build_sink(&args).await?;
 
-    let (event_tx, event_rx) = mpsc::unbounded_channel();
-    let (output_tx, output_rx) = mpsc::unbounded_channel();
+    let (event_tx, event_rx) = jsonl_channel(JSONL_QUEUE_CAPACITY);
+    let (output_tx, output_rx) = jsonl_channel(JSONL_QUEUE_CAPACITY);
 
     let event_writer = tokio::spawn(jsonl_writer(args.events_out.clone(), event_rx));
     let output_writer = tokio::spawn(jsonl_writer(args.outputs_out.clone(), output_rx));
@@ -365,6 +365,11 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Read the drop counters before dropping the senders. Non-zero means the
+    // corresponding file writer lagged and some best-effort records were shed
+    // to keep the in-flight queue (and RAM) bounded under saturation.
+    let events_dropped = event_tx.dropped();
+    let outputs_dropped = output_tx.dropped();
     drop(event_tx);
     drop(output_tx);
     event_writer
@@ -414,6 +419,10 @@ async fn main() -> Result<()> {
     println!("p99: {}", fmt_ms(percentile(&totals.latencies_ns, 0.99)));
     println!("events_out: {}", args.events_out.display());
     println!("outputs_out: {}", args.outputs_out.display());
+    // Best-effort record streams: non-zero means a file writer lagged under
+    // saturation and the bounded queue shed records to stay within RAM.
+    println!("events_dropped: {}", events_dropped);
+    println!("outputs_dropped: {}", outputs_dropped);
 
     Ok(())
 }
@@ -450,8 +459,8 @@ async fn build_sink(args: &Args) -> Result<Arc<dyn TelemetrySink>> {
 
 async fn run_bot(
     config: BotConfig,
-    event_tx: mpsc::UnboundedSender<Value>,
-    output_tx: mpsc::UnboundedSender<Value>,
+    event_tx: JsonlSender,
+    output_tx: JsonlSender,
     sink: Arc<dyn TelemetrySink>,
 ) -> Result<BotStats> {
     let bot_id = format!("bot_{}", config.global_bot_index + 1);
@@ -469,7 +478,7 @@ async fn run_bot(
     let mut pending: HashMap<String, Instant> = HashMap::new();
     // Recent resting order ids this bot can cancel (bounded; only tracked when
     // cancels are enabled).
-    let mut sent_orders: Vec<String> = Vec::new();
+    let mut sent_orders: VecDeque<String> = VecDeque::new();
     let mut seq_no = 0_u64;
     let started = Instant::now();
     let deadline = started + config.duration;
@@ -487,13 +496,13 @@ async fn run_bot(
                 pending.insert(prepared.track_id.clone(), Instant::now());
                 stats.orders_sent += 1;
                 if config.cancel_per_mille > 0 && prepared.is_new {
-                    sent_orders.push(prepared.track_id.clone());
+                    sent_orders.push_back(prepared.track_id.clone());
                     if sent_orders.len() > 512 {
-                        sent_orders.remove(0);
+                        sent_orders.pop_front();
                     }
                 }
 
-                let _ = event_tx.send(prepared.event);
+                event_tx.send(prepared.event);
                 let _ = sink.emit(TelemetryEvent {
                     run_id: config.run_id.clone(),
                     bot_id: bot_id.clone(),
@@ -570,8 +579,8 @@ async fn run_bot(
 /// the floor numbers.
 async fn run_bot_closed_loop(
     config: BotConfig,
-    event_tx: mpsc::UnboundedSender<Value>,
-    output_tx: mpsc::UnboundedSender<Value>,
+    event_tx: JsonlSender,
+    output_tx: JsonlSender,
     sink: Arc<dyn TelemetrySink>,
 ) -> Result<BotStats> {
     let bot_id = format!("bot_{}", config.global_bot_index + 1);
@@ -587,7 +596,7 @@ async fn run_bot_closed_loop(
 
     let mut stats = BotStats::default();
     let mut pending: HashMap<String, Instant> = HashMap::new();
-    let mut sent_orders: Vec<String> = Vec::new();
+    let mut sent_orders: VecDeque<String> = VecDeque::new();
     let mut seq_no = 0_u64;
     let started = Instant::now();
     let deadline = started + config.duration;
@@ -600,13 +609,13 @@ async fn run_bot_closed_loop(
         pending.insert(track_id.clone(), Instant::now());
         stats.orders_sent += 1;
         if config.cancel_per_mille > 0 && prepared.is_new {
-            sent_orders.push(track_id.clone());
+            sent_orders.push_back(track_id.clone());
             if sent_orders.len() > 512 {
-                sent_orders.remove(0);
+                sent_orders.pop_front();
             }
         }
 
-        let _ = event_tx.send(prepared.event);
+        event_tx.send(prepared.event);
         let _ = sink
             .emit(TelemetryEvent {
                 run_id: config.run_id.clone(),
@@ -728,9 +737,9 @@ async fn run_bot_pooled(
     config: BotConfig,
     sender: mpsc::Sender<(String, String)>,
     mut inbox: mpsc::UnboundedReceiver<(Instant, Value)>,
-    wire_sent: Arc<std::sync::Mutex<HashMap<String, Instant>>>,
-    event_tx: mpsc::UnboundedSender<Value>,
-    output_tx: mpsc::UnboundedSender<Value>,
+    wire_sent: Arc<pool::WireStampMap>,
+    event_tx: JsonlSender,
+    output_tx: JsonlSender,
     sink: Arc<dyn TelemetrySink>,
 ) -> Result<BotStats> {
     let bot_id = format!("bot_{}", config.global_bot_index + 1);
@@ -738,7 +747,7 @@ async fn run_bot_pooled(
     let mut pending: HashMap<String, Instant> = HashMap::new();
     // Recent resting order ids this bot can cancel (bounded; only tracked when
     // cancels are enabled).
-    let mut sent_orders: Vec<String> = Vec::new();
+    let mut sent_orders: VecDeque<String> = VecDeque::new();
     let mut seq_no = 0_u64;
     let started = Instant::now();
     let deadline = started + config.duration;
@@ -761,13 +770,13 @@ async fn run_bot_pooled(
                 pending.insert(prepared.track_id.clone(), Instant::now());
                 stats.orders_sent += 1;
                 if config.cancel_per_mille > 0 && prepared.is_new {
-                    sent_orders.push(prepared.track_id.clone());
+                    sent_orders.push_back(prepared.track_id.clone());
                     if sent_orders.len() > 512 {
-                        sent_orders.remove(0);
+                        sent_orders.pop_front();
                     }
                 }
 
-                let _ = event_tx.send(prepared.event);
+                event_tx.send(prepared.event);
                 let _ = sink.emit(TelemetryEvent {
                     run_id: config.run_id.clone(),
                     bot_id: bot_id.clone(),
@@ -815,10 +824,10 @@ async fn handle_engine_value(
     bot_id: &str,
     recv_instant: Instant,
     message: Value,
-    wire_sent: &Arc<std::sync::Mutex<HashMap<String, Instant>>>,
+    wire_sent: &Arc<pool::WireStampMap>,
     pending: &mut HashMap<String, Instant>,
     stats: &mut BotStats,
-    output_tx: &mpsc::UnboundedSender<Value>,
+    output_tx: &JsonlSender,
     sink: &Arc<dyn TelemetrySink>,
 ) -> Result<()> {
     // (async fn — instrument with #[tracing::instrument] rather than a scope
@@ -838,7 +847,7 @@ async fn handle_engine_value(
             // fleet-internal channel hops are excluded from the measurement.
             // Fall back to the bot-side stamp only if the wire stamp is
             // missing (e.g. ack raced the supervisor's insert).
-            let wire = wire_sent.lock().unwrap().remove(&client_order_id);
+            let wire = wire_sent.remove(&client_order_id);
             let bot_side = pending.remove(&client_order_id);
             // Gate: only an ack that matches an order this bot actually had
             // outstanding counts. A duplicate re-delivery, or a hostile engine
@@ -857,15 +866,16 @@ async fn handle_engine_value(
             if latency_ns > 0 {
                 stats.latencies_ns.push(latency_ns);
             }
-            let _ = output_tx.send(json!({
-                "event_type": "ack_received",
-                "run_id": run_id,
-                "bot_id": bot_id,
-                "client_order_id": client_order_id,
-                "recv_ts_ns": recv_ts_ns,
-                "latency_ns": latency_ns,
-                "message": message,
-            }));
+            // Move the parsed `message` Value into the output record instead of
+            // deep-cloning it; the inbound Value is owned here and consumed once.
+            output_tx.send(ack_output_record(
+                run_id,
+                bot_id,
+                &client_order_id,
+                recv_ts_ns,
+                latency_ns,
+                message,
+            ));
             let _ = sink
                 .emit(TelemetryEvent {
                     run_id: run_id.to_string(),
@@ -886,14 +896,15 @@ async fn handle_engine_value(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let _ = output_tx.send(json!({
-                "event_type": "fill_received",
-                "run_id": run_id,
-                "bot_id": bot_id,
-                "engine_seq": message.get("engine_seq").and_then(Value::as_u64),
-                "recv_ts_ns": recv_ts_ns,
-                "message": message,
-            }));
+            let engine_seq = message.get("engine_seq").and_then(Value::as_u64);
+            // Move the parsed `message` Value into the output record (see above).
+            output_tx.send(fill_output_record(
+                run_id,
+                bot_id,
+                engine_seq,
+                recv_ts_ns,
+                message,
+            ));
             let _ = sink
                 .emit(TelemetryEvent {
                     run_id: run_id.to_string(),
@@ -908,17 +919,60 @@ async fn handle_engine_value(
                 .await;
         }
         _ => {
-            let _ = output_tx.send(json!({
-                "event_type": "unknown_received",
-                "run_id": run_id,
-                "bot_id": bot_id,
-                "recv_ts_ns": recv_ts_ns,
-                "message": message,
-            }));
+            output_tx.send(unknown_output_record(run_id, bot_id, recv_ts_ns, message));
         }
     }
 
     Ok(())
+}
+
+/// Build the `ack_received` output record, moving `message` in (no deep clone).
+fn ack_output_record(
+    run_id: &str,
+    bot_id: &str,
+    client_order_id: &str,
+    recv_ts_ns: u64,
+    latency_ns: u64,
+    message: Value,
+) -> Value {
+    let mut map = serde_json::Map::with_capacity(7);
+    map.insert("event_type".into(), Value::from("ack_received"));
+    map.insert("run_id".into(), Value::from(run_id));
+    map.insert("bot_id".into(), Value::from(bot_id));
+    map.insert("client_order_id".into(), Value::from(client_order_id));
+    map.insert("recv_ts_ns".into(), Value::from(recv_ts_ns));
+    map.insert("latency_ns".into(), Value::from(latency_ns));
+    map.insert("message".into(), message);
+    Value::Object(map)
+}
+
+/// Build the `fill_received` output record, moving `message` in (no deep clone).
+fn fill_output_record(
+    run_id: &str,
+    bot_id: &str,
+    engine_seq: Option<u64>,
+    recv_ts_ns: u64,
+    message: Value,
+) -> Value {
+    let mut map = serde_json::Map::with_capacity(5);
+    map.insert("event_type".into(), Value::from("fill_received"));
+    map.insert("run_id".into(), Value::from(run_id));
+    map.insert("bot_id".into(), Value::from(bot_id));
+    map.insert("engine_seq".into(), Value::from(engine_seq));
+    map.insert("recv_ts_ns".into(), Value::from(recv_ts_ns));
+    map.insert("message".into(), message);
+    Value::Object(map)
+}
+
+/// Build the `unknown_received` output record, moving `message` in (no clone).
+fn unknown_output_record(run_id: &str, bot_id: &str, recv_ts_ns: u64, message: Value) -> Value {
+    let mut map = serde_json::Map::with_capacity(4);
+    map.insert("event_type".into(), Value::from("unknown_received"));
+    map.insert("run_id".into(), Value::from(run_id));
+    map.insert("bot_id".into(), Value::from(bot_id));
+    map.insert("recv_ts_ns".into(), Value::from(recv_ts_ns));
+    map.insert("message".into(), message);
+    Value::Object(map)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -928,7 +982,7 @@ async fn handle_engine_message(
     text: &str,
     pending: &mut HashMap<String, Instant>,
     stats: &mut BotStats,
-    output_tx: &mpsc::UnboundedSender<Value>,
+    output_tx: &JsonlSender,
     sink: &Arc<dyn TelemetrySink>,
 ) -> Result<()> {
     // Drop an unparseable frame rather than erroring out of the bot: a hostile
@@ -960,15 +1014,15 @@ async fn handle_engine_message(
             if latency_ns > 0 {
                 stats.latencies_ns.push(latency_ns);
             }
-            let _ = output_tx.send(json!({
-                "event_type": "ack_received",
-                "run_id": run_id,
-                "bot_id": bot_id,
-                "client_order_id": client_order_id,
-                "recv_ts_ns": recv_ts_ns,
-                "latency_ns": latency_ns,
-                "message": message,
-            }));
+            // Move the parsed `message` Value into the output record (no clone).
+            output_tx.send(ack_output_record(
+                run_id,
+                bot_id,
+                &client_order_id,
+                recv_ts_ns,
+                latency_ns,
+                message,
+            ));
             let _ = sink
                 .emit(TelemetryEvent {
                     run_id: run_id.to_string(),
@@ -989,14 +1043,15 @@ async fn handle_engine_message(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let _ = output_tx.send(json!({
-                "event_type": "fill_received",
-                "run_id": run_id,
-                "bot_id": bot_id,
-                "engine_seq": message.get("engine_seq").and_then(Value::as_u64),
-                "recv_ts_ns": recv_ts_ns,
-                "message": message,
-            }));
+            let engine_seq = message.get("engine_seq").and_then(Value::as_u64);
+            // Move the parsed `message` Value into the output record (no clone).
+            output_tx.send(fill_output_record(
+                run_id,
+                bot_id,
+                engine_seq,
+                recv_ts_ns,
+                message,
+            ));
             let _ = sink
                 .emit(TelemetryEvent {
                     run_id: run_id.to_string(),
@@ -1011,20 +1066,62 @@ async fn handle_engine_message(
                 .await;
         }
         _ => {
-            let _ = output_tx.send(json!({
-                "event_type": "unknown_received",
-                "run_id": run_id,
-                "bot_id": bot_id,
-                "recv_ts_ns": recv_ts_ns,
-                "message": message,
-            }));
+            output_tx.send(unknown_output_record(run_id, bot_id, recv_ts_ns, message));
         }
     }
 
     Ok(())
 }
 
-async fn jsonl_writer(path: PathBuf, mut rx: mpsc::UnboundedReceiver<Value>) -> Result<()> {
+/// Capacity of each JSONL record queue (events_out / outputs_out). Bounded so
+/// that a lagging file writer can't let the in-flight queue grow without bound
+/// and OOM the process under saturation; an unbounded channel previously did.
+const JSONL_QUEUE_CAPACITY: usize = 1 << 16;
+
+/// A cloneable, non-blocking sender for one JSONL record stream. On a full
+/// queue [`send`] DROPS the record and bumps `dropped` rather than applying
+/// backpressure to the bot's latency-measuring loop — these records are
+/// best-effort telemetry/output, never the measurement path. The `dropped`
+/// counter is shared across all clones so the caller can report a fleet total.
+#[derive(Clone)]
+struct JsonlSender {
+    tx: mpsc::Sender<Value>,
+    dropped: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl JsonlSender {
+    /// Enqueue a record, or drop-and-count it if the bounded queue is full.
+    fn send(&self, value: Value) {
+        match self.tx.try_send(value) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.dropped
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            // Receiver gone: writer already finished; nothing to do.
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
+
+    /// Records dropped because the queue was full. Shared across clones.
+    fn dropped(&self) -> u64 {
+        self.dropped.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Build a bounded JSONL channel: a [`JsonlSender`] and the matching receiver.
+fn jsonl_channel(capacity: usize) -> (JsonlSender, mpsc::Receiver<Value>) {
+    let (tx, rx) = mpsc::channel::<Value>(capacity.max(1));
+    (
+        JsonlSender {
+            tx,
+            dropped: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        },
+        rx,
+    )
+}
+
+async fn jsonl_writer(path: PathBuf, mut rx: mpsc::Receiver<Value>) -> Result<()> {
     let file = File::create(&path).with_context(|| format!("create {}", path.display()))?;
     let mut writer = BufWriter::new(file);
     while let Some(value) = rx.recv().await {
@@ -1102,7 +1199,7 @@ fn make_order(config: &BotConfig, seq_no: u64) -> NewOrder {
 /// Decide the next action for a bot and prepare it for sending. With
 /// probability `cancel_per_mille` (and only once the bot has resting orders to
 /// cancel) it emits a cancel of a previously-sent order; otherwise a new order.
-fn build_send(config: &BotConfig, bot_id: &str, seq_no: u64, sent: &[String]) -> Prepared {
+fn build_send(config: &BotConfig, bot_id: &str, seq_no: u64, sent: &VecDeque<String>) -> Prepared {
     zone!("build_send");
     let h = splitmix64(
         config
@@ -1125,16 +1222,23 @@ fn build_send(config: &BotConfig, bot_id: &str, seq_no: u64, sent: &[String]) ->
             orig_client_order_id: orig,
             ts_ns,
         };
+        // Serialize the order struct ONCE into a Value, then derive both the
+        // wire text (to_string of the Value) and the event (the Value moved
+        // under "order") from it — instead of serializing the struct twice
+        // (once for the wire, once inside json!). Field order in the JSON is
+        // not load-bearing: every consumer parses by name.
+        let order_value = serde_json::to_value(&cancel).unwrap_or(Value::Null);
+        let text = serde_json::to_string(&order_value).unwrap_or_default();
         let event = json!({
             "event_type": "cancel_sent",
             "run_id": config.run_id,
             "bot_id": bot_id,
             "seq_no": seq_no,
             "send_ts_ns": ts_ns,
-            "order": cancel,
+            "order": order_value,
         });
         Prepared {
-            text: serde_json::to_string(&cancel).unwrap_or_default(),
+            text,
             track_id: coid,
             event,
             send_ts_ns: ts_ns,
@@ -1144,16 +1248,20 @@ fn build_send(config: &BotConfig, bot_id: &str, seq_no: u64, sent: &[String]) ->
         let order = make_order(config, seq_no);
         let coid = order.client_order_id.clone();
         let send_ts_ns = order.ts_ns;
+        // Serialize once into a Value; reuse for both wire text and event (see
+        // the cancel branch above).
+        let order_value = serde_json::to_value(&order).unwrap_or(Value::Null);
+        let text = serde_json::to_string(&order_value).unwrap_or_default();
         let event = json!({
             "event_type": "order_sent",
             "run_id": config.run_id,
             "bot_id": bot_id,
             "seq_no": seq_no,
             "send_ts_ns": send_ts_ns,
-            "order": order,
+            "order": order_value,
         });
         Prepared {
-            text: serde_json::to_string(&order).unwrap_or_default(),
+            text,
             track_id: coid,
             event,
             send_ts_ns,
@@ -1199,19 +1307,50 @@ fn avg_tps(ack_recv_ts_ns: &[u64], acks_received: u64) -> f64 {
     acks_received as f64 / span_secs.max(1.0)
 }
 
-/// Peak TPS = the largest number of acks landing in any aligned 1-second
+/// Peak TPS = the largest number of acks landing in any *sliding* 1-second
 /// window. This is "max sustained throughput", distinct from the average
 /// (acks / duration), and is the headline the brief asks for.
-fn peak_tps(ack_recv_ts_ns: &mut [u64], window_secs: u64) -> u64 {
+///
+/// Previously this bucketed by ALIGNED wall-second (`ts / 1e9`): a steady rate
+/// R acks/s split across two adjacent fixed buckets reports anywhere from ~0.5R
+/// (a burst centred on a second boundary) to ~0.99R, never the true R. A true
+/// sliding window is alignment-independent: a two-pointer scan over the sorted
+/// stamps finds, for each window start `i`, the furthest `j` still within 1s and
+/// tracks the max count `j - i + 1`. `window_secs` is unused (kept for the
+/// call-site signature) — the window is always 1 second by definition of TPS.
+fn peak_tps(ack_recv_ts_ns: &mut [u64], _window_secs: u64) -> u64 {
     if ack_recv_ts_ns.is_empty() {
         return 0;
     }
     ack_recv_ts_ns.sort_unstable();
-    let counter = bench_core::metrics::TpsCounter::new(window_secs as usize + 2);
-    for ts in ack_recv_ts_ns.iter() {
-        counter.record(*ts);
+    sliding_window_peak(ack_recv_ts_ns, 1_000_000_000)
+}
+
+/// Largest count of timestamps within any half-open `[ts[i], ts[i] + window_ns)`
+/// window. Input must be sorted ascending. O(n) two-pointer scan.
+fn sliding_window_peak(sorted_ts_ns: &[u64], window_ns: u64) -> u64 {
+    let mut peak: u64 = 0;
+    let mut j: usize = 0;
+    for i in 0..sorted_ts_ns.len() {
+        if j < i {
+            j = i;
+        }
+        // Advance j while ts[j] is strictly within one window of ts[i]. A
+        // half-open window [t, t+1s) matches the per-second bucketing intent:
+        // 1000 acks at exactly 1ms spacing from t=0.5s span [0.5s, 1.499s] and
+        // all fall inside [ts[0], ts[0]+1s) only at the boundary, so use the
+        // inclusive-of-start, exclusive-of-(start+window) convention below.
+        while j + 1 < sorted_ts_ns.len()
+            && sorted_ts_ns[j + 1].saturating_sub(sorted_ts_ns[i]) < window_ns
+        {
+            j += 1;
+        }
+        let count = (j - i + 1) as u64;
+        if count > peak {
+            peak = count;
+        }
     }
-    counter.peak_tps()
+    peak
 }
 
 fn percentile(sorted: &[u64], p: f64) -> Option<f64> {
@@ -1236,4 +1375,64 @@ fn now_ns() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The headline correctness fix (#4): a steady stream of acks must report
+    /// its TRUE per-second rate, not the artifact of where it lands relative to
+    /// an aligned wall-second boundary. 1000 acks at exactly 1ms spacing,
+    /// starting at t = 0.5s, all fall within a single sliding 1s window, so the
+    /// peak is 1000 — whereas aligned-second bucketing would split them across
+    /// the [0,1) and [1,2) buckets and report ~500.
+    #[test]
+    fn sliding_peak_counts_full_rate_across_a_boundary() {
+        let half_second_ns = 500_000_000_u64;
+        let ms_ns = 1_000_000_u64;
+        let mut ts: Vec<u64> = (0..1000).map(|i| half_second_ns + i * ms_ns).collect();
+        // Peak must be the true rate, not the ~500 an aligned-second bucket gives.
+        assert_eq!(peak_tps(&mut ts, 60), 1000);
+    }
+
+    /// `peak_tps` must be order-independent: it sorts its input first.
+    #[test]
+    fn sliding_peak_is_order_independent() {
+        let half_second_ns = 500_000_000_u64;
+        let ms_ns = 1_000_000_u64;
+        let mut ts: Vec<u64> = (0..1000).map(|i| half_second_ns + i * ms_ns).collect();
+        ts.reverse();
+        assert_eq!(peak_tps(&mut ts, 60), 1000);
+    }
+
+    #[test]
+    fn sliding_peak_empty_is_zero() {
+        let mut ts: Vec<u64> = Vec::new();
+        assert_eq!(peak_tps(&mut ts, 60), 0);
+    }
+
+    /// Two dense 1s bursts separated by a long quiet gap: the peak is the size
+    /// of the larger burst, not the sum, and not diluted by the gap.
+    #[test]
+    fn sliding_peak_picks_the_densest_window() {
+        let ms_ns = 1_000_000_u64;
+        // Burst A: 300 acks in the first 300ms.
+        let mut ts: Vec<u64> = (0..300).map(|i| i * ms_ns).collect();
+        // Burst B: 500 acks in 500ms, starting 10s later (well outside 1s).
+        ts.extend((0..500).map(|i| 10_000_000_000 + i * ms_ns));
+        assert_eq!(peak_tps(&mut ts, 60), 500);
+    }
+
+    /// The half-open window is exclusive of `start + 1s`: an ack exactly 1s
+    /// after the window start is NOT counted in that window.
+    #[test]
+    fn sliding_window_is_half_open() {
+        // Two acks exactly 1s apart -> never both in the same [t, t+1s) window.
+        let ts = vec![0u64, 1_000_000_000u64];
+        assert_eq!(sliding_window_peak(&ts, 1_000_000_000), 1);
+        // Just under 1s apart -> both fit.
+        let ts = vec![0u64, 999_999_999u64];
+        assert_eq!(sliding_window_peak(&ts, 1_000_000_000), 2);
+    }
 }

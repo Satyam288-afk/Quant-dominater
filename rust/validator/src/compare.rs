@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 use reference_orderbook::Fill;
 use serde_json::{json, Value};
@@ -12,13 +13,12 @@ pub fn compare(
     deduped_idx: &[usize],
     extra_violations: &[Violation],
 ) -> Value {
-    // The deduped fills selected by index out of the single materialised Vec.
-    let actual_fills: Vec<Fill> = deduped_idx.iter().map(|&i| fills[i].fill.clone()).collect();
-
     // Diff logic mirrors the original validator. Edge case detectors only
     // run if the diff itself passes (i.e. fills match) — otherwise the diff
     // failure stays primary and the edge cases ride in `extra_violations`.
-    let diff_result = diff(&run_id, expected, &actual_fills);
+    // The deduped fills are addressed by index out of the single materialised
+    // Vec, so we never clone a second full copy of every fill here.
+    let diff_result = diff(&run_id, expected, fills, deduped_idx);
 
     let mut out = diff_result;
     if !extra_violations.is_empty() {
@@ -45,20 +45,33 @@ pub fn compare(
     out
 }
 
-fn diff(run_id: &str, expected: &[Fill], actual_fills: &[Fill]) -> Value {
-    if expected == actual_fills {
+/// Multiset key for a fill: a 64-bit hash of its four identifying fields. The
+/// previous implementation `format!`'d a `String` per fill (an allocation on
+/// the hot diff path); hashing the borrowed fields in place is allocation-free.
+/// The exact-equality fast path below short-circuits the all-correct case, so
+/// hashing only feeds the order-insensitive multiset diff that runs once a
+/// mismatch is already known to exist; a 64-bit collision there (~2^-64) is
+/// far below the noise floor of the run itself.
+type FillKey = u64;
+
+fn diff(run_id: &str, expected: &[Fill], fills: &[ActualFill], deduped_idx: &[usize]) -> Value {
+    // The deduped actual fills, addressed by index without copying.
+    let actual = |i: usize| -> &Fill { &fills[deduped_idx[i]].fill };
+    let n_actual = deduped_idx.len();
+
+    if expected.len() == n_actual && expected.iter().enumerate().all(|(i, e)| e == actual(i)) {
         return valid_result(run_id, expected.len());
     }
 
-    let mut remaining_actual = fill_counts(actual_fills);
+    let mut remaining_actual = fill_counts(fills, deduped_idx);
     for (idx, expected_fill) in expected.iter().enumerate() {
         let key = fill_key(expected_fill);
         if decrement_count(&mut remaining_actual, &key) {
             continue;
         }
 
-        if let Some(actual_candidate) = actual_fills
-            .iter()
+        if let Some(actual_candidate) = (0..n_actual)
+            .map(actual)
             .find(|fill| fill.price == expected_fill.price && fill.qty == expected_fill.qty)
         {
             return json!({
@@ -81,7 +94,8 @@ fn diff(run_id: &str, expected: &[Fill], actual_fills: &[Fill]) -> Value {
         });
     }
 
-    for actual_fill in actual_fills {
+    for i in 0..n_actual {
+        let actual_fill = actual(i);
         let key = fill_key(actual_fill);
         if decrement_count(&mut remaining_actual, &key) {
             return json!({
@@ -106,15 +120,15 @@ fn valid_result(run_id: &str, fills_checked: usize) -> Value {
     })
 }
 
-fn fill_counts(fills: &[Fill]) -> HashMap<String, usize> {
+fn fill_counts(fills: &[ActualFill], deduped_idx: &[usize]) -> HashMap<FillKey, usize> {
     let mut counts = HashMap::new();
-    for fill in fills {
-        *counts.entry(fill_key(fill)).or_insert(0) += 1;
+    for &i in deduped_idx {
+        *counts.entry(fill_key(&fills[i].fill)).or_insert(0) += 1;
     }
     counts
 }
 
-fn decrement_count(counts: &mut HashMap<String, usize>, key: &str) -> bool {
+fn decrement_count(counts: &mut HashMap<FillKey, usize>, key: &FillKey) -> bool {
     let Some(count) = counts.get_mut(key) else {
         return false;
     };
@@ -125,9 +139,11 @@ fn decrement_count(counts: &mut HashMap<String, usize>, key: &str) -> bool {
     true
 }
 
-fn fill_key(fill: &Fill) -> String {
-    format!(
-        "{}|{}|{}|{}",
-        fill.buy_order_id, fill.sell_order_id, fill.price, fill.qty
-    )
+fn fill_key(fill: &Fill) -> FillKey {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    fill.buy_order_id.hash(&mut hasher);
+    fill.sell_order_id.hash(&mut hasher);
+    fill.price.hash(&mut hasher);
+    fill.qty.hash(&mut hasher);
+    hasher.finish()
 }

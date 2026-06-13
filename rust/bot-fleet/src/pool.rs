@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -20,6 +21,59 @@ const RECONNECT_CAP_MS: u64 = 2_000;
 /// burning a core), and inflate the judge-facing `reconnects` counter. A flap
 /// is backed off exponentially and is NOT counted as a recovery.
 const RECONNECT_FLAP_MS: u64 = 500;
+
+/// Wire-adjacent send stamps, striped across `SHARDS` independent mutexes so the
+/// insert-per-send / remove-per-ack traffic does not convoy on one global lock.
+///
+/// Previously a single `Mutex<HashMap<String, Instant>>` was locked twice per
+/// round-trip (insert at send, remove at ack) plus a periodic full-map
+/// `retain()` sweep, which formed a lock convoy that capped fleet throughput
+/// (measured ~107 mutex waits / 6s at 99k TPS). Striping by a stable hash of
+/// the track id spreads that traffic across many locks; a send-stamp and its
+/// matching ack-stamp always hash to the same shard, so semantics are
+/// preserved. The bot keeps a local pending fallback (main.rs) regardless.
+pub struct WireStampMap {
+    shards: Vec<Mutex<HashMap<String, Instant>>>,
+}
+
+/// Number of independent stamp-map shards. Power of two; comfortably exceeds the
+/// pool connection count at the scales we run so contention is rare.
+const STAMP_SHARDS: usize = 64;
+
+impl WireStampMap {
+    fn new() -> Self {
+        let mut shards = Vec::with_capacity(STAMP_SHARDS);
+        for _ in 0..STAMP_SHARDS {
+            shards.push(Mutex::new(HashMap::new()));
+        }
+        Self { shards }
+    }
+
+    #[inline]
+    fn shard_for(&self, key: &str) -> &Mutex<HashMap<String, Instant>> {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        let idx = (hasher.finish() as usize) & (STAMP_SHARDS - 1);
+        &self.shards[idx]
+    }
+
+    /// Record the wire send instant for a track id.
+    pub fn insert(&self, key: String, sent: Instant) {
+        self.shard_for(&key).lock().unwrap().insert(key, sent);
+    }
+
+    /// Take (and remove) the wire send instant for a track id, if present.
+    pub fn remove(&self, key: &str) -> Option<Instant> {
+        self.shard_for(key).lock().unwrap().remove(key)
+    }
+
+    /// Drop every stamp older than `ttl`, across all shards.
+    fn sweep(&self, ttl: Duration) {
+        for shard in &self.shards {
+            shard.lock().unwrap().retain(|_, sent| sent.elapsed() < ttl);
+        }
+    }
+}
 
 /// One outgoing WebSocket per pool connection. `bots/N` virtual bots share
 /// each socket. Routing inbound messages back to a specific bot is done by
@@ -45,7 +99,7 @@ pub struct ConnectionPool {
     senders: Vec<mpsc::Sender<(String, String)>>,
     bot_inboxes: Vec<Option<mpsc::UnboundedReceiver<(Instant, Value)>>>,
     reconnects: Arc<AtomicU64>,
-    wire_sent: Arc<Mutex<HashMap<String, Instant>>>,
+    wire_sent: Arc<WireStampMap>,
 }
 
 impl ConnectionPool {
@@ -86,10 +140,12 @@ impl ConnectionPool {
         }
         let inboxes_tx = Arc::new(inboxes_tx);
         let reconnects = Arc::new(AtomicU64::new(0));
-        let wire_sent: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+        let wire_sent: Arc<WireStampMap> = Arc::new(WireStampMap::new());
 
         // Stamp-map sweeper: drops entries older than stamp_ttl. Exits once
         // every other holder of the map (pool, supervisors, bots) is gone.
+        // The sweep walks shards one at a time, so it never holds more than a
+        // single shard lock and never blocks the whole map.
         {
             let map = Arc::clone(&wire_sent);
             let period = stamp_ttl.max(Duration::from_millis(250));
@@ -101,9 +157,7 @@ impl ConnectionPool {
                     if Arc::strong_count(&map) <= 1 {
                         return;
                     }
-                    map.lock()
-                        .unwrap()
-                        .retain(|_, sent| sent.elapsed() < stamp_ttl);
+                    map.sweep(stamp_ttl);
                 }
             });
         }
@@ -181,7 +235,7 @@ impl ConnectionPool {
 
     /// Wire-adjacent send stamps, written by the supervisor immediately after
     /// `write.send` completes, consumed by the bot when its ack arrives.
-    pub fn wire_sent_handle(&self) -> Arc<Mutex<HashMap<String, Instant>>> {
+    pub fn wire_sent_handle(&self) -> Arc<WireStampMap> {
         Arc::clone(&self.wire_sent)
     }
 }
@@ -219,7 +273,7 @@ async fn supervise_connection(
     target: String,
     pod_offset: usize,
     reconnects: Arc<AtomicU64>,
-    wire_sent: Arc<Mutex<HashMap<String, Instant>>>,
+    wire_sent: Arc<WireStampMap>,
 ) {
     let mut current = Some(initial);
     let mut backoff = Duration::from_millis(RECONNECT_BASE_MS);
@@ -303,7 +357,7 @@ async fn supervise_connection(
                             break false; // socket write failed -> reconnect
                         }
                         // Send stamp at the wire, right after the frame left.
-                        wire_sent.lock().unwrap().insert(track_id, Instant::now());
+                        wire_sent.insert(track_id, Instant::now());
                     }
                     None => {
                         let _ = write.close().await;
@@ -449,6 +503,40 @@ mod tests {
     fn unknown_message_dropped() {
         let v = json!({ "type": "weird" });
         assert!(recipient_bots(&v, 0).is_empty());
+    }
+
+    #[test]
+    fn wire_stamp_map_insert_remove_roundtrip() {
+        // #3: a send-stamp and its matching ack-stamp share a key, so they hash
+        // to the same shard — insert then remove must return the stamp, and a
+        // second remove must be empty (consumed exactly once).
+        let map = WireStampMap::new();
+        let now = Instant::now();
+        map.insert("bot_5_000001".to_string(), now);
+        map.insert("bot_6_000002".to_string(), now);
+        assert_eq!(map.remove("bot_5_000001"), Some(now));
+        assert_eq!(map.remove("bot_5_000001"), None);
+        assert_eq!(map.remove("bot_6_000002"), Some(now));
+        // An id never inserted finds no stamp.
+        assert_eq!(map.remove("bot_99_000009"), None);
+    }
+
+    #[test]
+    fn wire_stamp_map_sweep_drops_stale_only() {
+        // The sweeper drops entries older than the ttl across all shards while
+        // leaving fresh ones intact.
+        let map = WireStampMap::new();
+        let stamp = Instant::now();
+        for i in 0..1000u64 {
+            map.insert(format!("bot_{i}_000001"), stamp);
+        }
+        // A generous ttl keeps everything: a representative key is still present.
+        map.sweep(Duration::from_secs(3600));
+        assert_eq!(map.remove("bot_500_000001"), Some(stamp));
+        // A 0ns ttl evicts every remaining entry across all shards.
+        map.sweep(Duration::from_nanos(0));
+        assert_eq!(map.remove("bot_0_000001"), None);
+        assert_eq!(map.remove("bot_999_000001"), None);
     }
 
     #[test]

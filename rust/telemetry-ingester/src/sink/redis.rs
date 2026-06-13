@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -29,12 +30,12 @@ const RUN_IDLE_TTL: Duration = Duration::from_secs(900);
 /// Periodically pushes a rolling "live metrics" snapshot per run into Redis.
 /// The leaderboard UI watches `run:{id}:metrics` hash and a couple of XADD
 /// streams capped via MAXLEN ~ 600 to keep the working set bounded.
-pub async fn spawn(url: String, flush_ms: u64) -> Result<mpsc::Sender<TelemetryEvent>> {
+pub async fn spawn(url: String, flush_ms: u64) -> Result<mpsc::Sender<Arc<TelemetryEvent>>> {
     let client = redis::Client::open(url.clone()).context("opening redis url")?;
     let mut mgr = ConnectionManager::new(client)
         .await
         .with_context(|| format!("connecting redis {url}"))?;
-    let (tx, mut rx) = mpsc::channel::<TelemetryEvent>(16_384);
+    let (tx, mut rx) = mpsc::channel::<Arc<TelemetryEvent>>(16_384);
 
     let interval_secs = (flush_ms.max(250)) as f64 / 1000.0;
     tokio::spawn(async move {
@@ -271,30 +272,13 @@ async fn flush(
             }
         };
 
-        // Derive the merged average from the cross-pod cumulative sum/count and
-        // write it back into the same `avg_latency_ms` field the leaderboard
-        // read path (HGETALL) already expects, so that read path is unchanged.
-        // Only attempt once the counters landed, so we never compute from a
-        // half-applied state.
-        if hash_ok {
-            let totals: redis::RedisResult<(Option<i64>, Option<i64>)> = redis::cmd("HMGET")
-                .arg(&key)
-                .arg("latency_sum_ns")
-                .arg("latency_count")
-                .query_async(mgr)
-                .await;
-            if let Ok((Some(sum_ns), Some(count))) = totals {
-                if count > 0 {
-                    let avg_ms = (sum_ns as f64 / count as f64) / 1_000_000.0;
-                    let _: redis::RedisResult<()> = redis::cmd("HSET")
-                        .arg(&key)
-                        .arg("avg_latency_ms")
-                        .arg(avg_ms)
-                        .query_async(mgr)
-                        .await;
-                }
-            }
-        }
+        // No materialized `avg_latency_ms` write here. The cross-pod cumulative
+        // `latency_sum_ns` / `latency_count` are already HINCRBY-merged above, so
+        // the leaderboard read path derives avg = latency_sum_ns / latency_count
+        // (ns -> ms) from the same HGETALL it already does. Computing it on read
+        // avoids the extra HMGET+HSET round-trips per run per flush and the race
+        // where a pod's published avg reflected a snapshot taken before another
+        // pod's HINCRBY (inconsistent with the published sum/count).
 
         // Advance the flushed high-water marks only after a successful push, so
         // a transient Redis error replays the delta on the next flush instead

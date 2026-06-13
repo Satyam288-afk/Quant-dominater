@@ -37,6 +37,21 @@ impl LatencyHistogram {
     pub fn count(&self) -> u64 {
         self.inner.lock().unwrap().len()
     }
+
+    /// Merge another histogram's recorded samples into this one (hdrhistogram
+    /// `add`). Used to build a single run-wide histogram from the per-bot
+    /// histograms so run-wide percentiles are computed from the *merged sample
+    /// distribution* (mathematically correct) rather than ack-weight-averaging
+    /// per-bot quantiles — the latter under-reports the tail (a 1-in-10 bot at
+    /// 500ms gets averaged down toward the fast bots' 5ms, hiding the real
+    /// p99/p999). All histograms here share identical bounds, so `add` never
+    /// resizes; on the impossible mismatch we ignore the error rather than
+    /// panic on a reporting path.
+    pub fn merge(&mut self, other: &LatencyHistogram) {
+        let src = other.inner.lock().unwrap();
+        let mut dst = self.inner.lock().unwrap();
+        let _ = dst.add(&*src);
+    }
 }
 
 impl Default for LatencyHistogram {
@@ -59,5 +74,35 @@ mod tests {
         let p99 = h.percentile_ms(0.99);
         assert!((p50 - 500.0).abs() < 5.0, "p50 was {}", p50);
         assert!((p99 - 990.0).abs() < 5.0, "p99 was {}", p99);
+    }
+
+    #[test]
+    fn merge_combines_sample_distributions() {
+        // 9 "fast" bots each with 100 samples at 5ms, 1 "slow" bot with 100
+        // samples at 500ms. Merged across all bots, the slow bot is 10% of the
+        // sample mass, so the true p99/p999 sit in the slow region (~500ms),
+        // NOT the ~54ms an ack-weighted average of per-bot quantiles produces.
+        let mut merged = LatencyHistogram::new();
+        for _ in 0..9 {
+            let fast = LatencyHistogram::new();
+            for _ in 0..100 {
+                fast.record_ns(5_000_000);
+            }
+            merged.merge(&fast);
+        }
+        let slow = LatencyHistogram::new();
+        for _ in 0..100 {
+            slow.record_ns(500_000_000);
+        }
+        merged.merge(&slow);
+
+        assert_eq!(merged.count(), 1000);
+        let p50 = merged.percentile_ms(0.50);
+        let p99 = merged.percentile_ms(0.99);
+        // Bulk (90%) is at 5ms -> p50 stays fast.
+        assert!((p50 - 5.0).abs() < 1.0, "p50 was {}", p50);
+        // Tail (top 10%) is the 500ms bot -> p99 must reflect it, not be
+        // diluted toward the fast bots.
+        assert!(p99 >= 450.0, "p99 must surface the slow tail, was {}", p99);
     }
 }

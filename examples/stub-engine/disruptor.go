@@ -31,6 +31,14 @@ const (
 	disruptorShards  = 8
 	disruptorRingLog = 14 // 16384 slots per shard
 	disruptorOutputs = 4
+	// clientOutQueue is the bounded per-connection outbound buffer. A single
+	// backpressured client must never stall the matchers: the output writers do
+	// a NON-BLOCKING enqueue here (drop-and-count on overflow, mirroring the
+	// audit log's drop policy) and a dedicated per-client writer goroutine owns
+	// the synchronous SendJSON. So a slow/non-reading client fills only its OWN
+	// queue and then drops its own messages, while every other client — and all
+	// 8 matchers — keep flowing.
+	clientOutQueue = 4096
 )
 
 type reqKind uint8
@@ -209,6 +217,42 @@ func (de *DisruptorEngine) Reject(client *Client, reason string) {
 	}}
 }
 
+// enqueue hands a payload to the client's bounded outbound queue without ever
+// blocking the caller (an output writer, ultimately the matcher's fan-out). The
+// queue + its dedicated writer goroutine are created on first use. On overflow
+// — a client that is not draining its socket fast enough — the payload is
+// dropped and counted, exactly mirroring the audit log's best-effort drop
+// policy; the authoritative record is the bot fleet's own events.jsonl. This is
+// what keeps one backpressured client from stalling the writers, de.out, and
+// the matchers behind them.
+func (c *Client) enqueue(payload any) {
+	c.outInit.Do(func() {
+		c.outQ = make(chan any, clientOutQueue)
+		go c.writeLoop()
+	})
+	select {
+	case c.outQ <- payload:
+	default:
+		c.outDropped.Add(1)
+	}
+}
+
+// writeLoop is the single dedicated writer for one connection. It owns the
+// synchronous SendJSON (the per-client mutex still serializes it against the
+// ping goroutine's WriteControl). A blocked WriteJSON parks only THIS goroutine;
+// the matchers and every other client are unaffected. A write error means the
+// connection is gone — the writer exits and any further enqueues simply fill
+// the bounded queue and then drop-and-count, so nothing leaks unboundedly and
+// the Client is GC'd once the ws() read loop returns. The run's correctness
+// comes from the validator over the bot fleet's own logs, not these writes.
+func (c *Client) writeLoop() {
+	for payload := range c.outQ {
+		if err := c.SendJSON(payload); err != nil {
+			return
+		}
+	}
+}
+
 func (de *DisruptorEngine) outputLoop() {
 	for msg := range de.out {
 		if msg.client == nil {
@@ -217,11 +261,10 @@ func (de *DisruptorEngine) outputLoop() {
 		if de.audit != nil {
 			de.audit(msg.payload)
 		}
-		if err := msg.client.SendJSON(msg.payload); err != nil {
-			// connection gone — drop; the run's correctness comes from the
-			// validator over the bot fleet's own logs.
-			_ = err
-		}
+		// NON-BLOCKING hand-off: never call the client socket from here. A slow
+		// client can only fill its own per-connection queue (drop-and-count),
+		// so it can never back up de.out and stall the matchers.
+		msg.client.enqueue(msg.payload)
 	}
 }
 

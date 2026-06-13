@@ -24,13 +24,16 @@ const DEDUP_WINDOW: usize = 262_144;
 /// a cap, a flood of distinct run_ids grows `runs` for the pod's whole uptime
 /// and OOMs against the 1Gi limit the dedup window above is already sized for
 /// (50k run_ids alone is ~1.5 GiB). Once the cap is hit we drop+log new
-/// run_ids instead of allocating; existing runs keep working unchanged. Each
-/// admitted RunState eagerly allocates ~256 KiB (a 4096-slot TpsCounter plus
-/// per-bot HDR histograms), so the cap also sets the absolute ceiling: 3000
-/// runs ~= 768 MiB, comfortably under the 1Gi pod budget. A real benchmark
-/// fans out to a handful of runs, far below this. Also reused by the redis sink
-/// to bound its own per-run rollup map (the same attacker-controlled-run_id OOM
-/// vector one layer down).
+/// run_ids instead of allocating; existing runs keep working unchanged. A
+/// RunState's footprint is dominated by its rolling dedup window
+/// (~2*DEDUP_WINDOW u64 identities) plus its per-bot HDR histograms; the
+/// TpsCounter is no longer a fixed pre-sized ring — its buckets are sparse and
+/// hard-capped (see `TpsCounter`'s `MAX_BUCKETS`, ~128 KiB worst case), so it
+/// no longer fixes the per-run size at ~256 KiB. The cap still sets the
+/// absolute ceiling on live runs: 3000 runs stays comfortably under the 1Gi pod
+/// budget. A real benchmark fans out to a handful of runs, far below this. Also
+/// reused by the redis sink to bound its own per-run rollup map (the same
+/// attacker-controlled-run_id OOM vector one layer down).
 pub const MAX_RUNS: usize = 3000;
 
 /// Per-(run_id) cap on distinct `bot_id`s. `bot_id` is likewise event-supplied,
@@ -203,9 +206,17 @@ impl Default for BotState {
 /// a clone of the Arc (one atomic increment) instead of a heap allocation +
 /// byte copy, which is the per-event cost the old `event.run_id.clone()` /
 /// `event.bot_id.clone()` map keys paid on every single event.
+///
+/// TM (#22): the table hashes a `&str` on every `intern` call — twice per event
+/// (run_id + bot_id). The default `SipHash` is the wrong tool for short
+/// interner keys; ahash is the project's measured-faster choice (the same swap
+/// the event-identity path already made). On a hit (the steady-state path,
+/// since run/bot cardinality is tiny vs event count) we do one hashed probe and
+/// clone the Arc; we only fall through to the second probe + allocation when we
+/// first see a key, so the common path never allocates.
 #[derive(Default)]
 struct Interner {
-    table: HashMap<Box<str>, Arc<str>>,
+    table: HashMap<Box<str>, Arc<str>, ahash::RandomState>,
 }
 
 impl Interner {
@@ -271,16 +282,46 @@ impl Aggregator {
             .runs
             .entry(run_key)
             .or_insert_with(RunState::new);
-        // Idempotency gate: drop at-least-once re-deliveries so they can't
-        // double-count peak_tps or inflate the percentile sample set.
-        let identity = event_identity(&run.identity, event);
-        if !run.seen.insert(identity) {
-            run.duplicates_dropped += 1;
-            return;
+        // Idempotency gate (#8): only AckReceived feeds the order-independent
+        // metrics that a re-delivery could corrupt — peak_tps (bucketed once per
+        // ack) and the latency percentile sample set. order_sent/fill counters
+        // are monotone tallies the leaderboard doesn't tail-sensitively depend
+        // on, so we skip the dedup probe + identity hash for them (they were ~2/3
+        // of all events), cutting the dedup cost proportionally. Acks stay fully
+        // idempotent under Kafka's at-least-once re-delivery.
+        if matches!(event.event_type, EventKind::AckReceived) {
+            let identity = event_identity(&run.identity, event);
+            if !run.seen.insert(identity) {
+                run.duplicates_dropped += 1;
+                return;
+            }
         }
         // Only wallclock-truthy events (Ack/Fill carry real recv_ts_ns)
         // contribute to the run window. order_sent's send_ts_ns is the
         // engine-domain timestamp baked into the order, not real time.
+        //
+        // #29: the window AND the tps_counter are updated only AFTER the
+        // MAX_BOTS_PER_RUN cap check below, so an ack from a dropped (capped)
+        // bot contributes to neither the observed span nor the tps_counter —
+        // keeping the average-tps numerator (sum over *stored* bots) and its
+        // divisor (the same observed span / tps_counter) consistent. Previously
+        // a dropped-bot ack widened the span while never being summed, biasing
+        // the average low.
+        //
+        // Same cardinality guard one level down: `bot_id` is event-supplied, so
+        // cap distinct bots per run. Check before interning so a dropped bot_id
+        // allocates nothing (`contains_key` borrows the event's `&str`).
+        if run.bots.len() >= MAX_BOTS_PER_RUN && !run.bots.contains_key(event.bot_id.as_str()) {
+            run.bots_dropped += 1;
+            tracing::warn!(
+                run_id = %event.run_id,
+                bot_id = %event.bot_id,
+                max_bots = MAX_BOTS_PER_RUN,
+                bots_dropped = run.bots_dropped,
+                "bot_id cardinality cap reached for run; dropping events for new bot_id"
+            );
+            return;
+        }
         if event.recv_ts_ns > 0
             && matches!(
                 event.event_type,
@@ -298,20 +339,6 @@ impl Aggregator {
         // An ack is one completed transaction; bucket it for peak TPS.
         if event.recv_ts_ns > 0 && matches!(event.event_type, EventKind::AckReceived) {
             run.tps_counter.record(event.recv_ts_ns);
-        }
-        // Same cardinality guard one level down: `bot_id` is event-supplied, so
-        // cap distinct bots per run. Check before interning so a dropped bot_id
-        // allocates nothing (`contains_key` borrows the event's `&str`).
-        if run.bots.len() >= MAX_BOTS_PER_RUN && !run.bots.contains_key(event.bot_id.as_str()) {
-            run.bots_dropped += 1;
-            tracing::warn!(
-                run_id = %event.run_id,
-                bot_id = %event.bot_id,
-                max_bots = MAX_BOTS_PER_RUN,
-                bots_dropped = run.bots_dropped,
-                "bot_id cardinality cap reached for run; dropping events for new bot_id"
-            );
-            return;
         }
         let bot_key = self.interner.intern(&event.bot_id);
         let bot = run.bots.entry(bot_key).or_default();
@@ -341,11 +368,21 @@ impl Aggregator {
 
             let mut totals = BotTotals::default();
             let mut bots: Vec<BotSummary> = Vec::with_capacity(state.bots.len());
+            // #11: run-wide percentiles are computed from a single histogram
+            // MERGED across every bot, not from an ack-weighted average of the
+            // per-bot quantiles. Averaging per-bot quantiles is mathematically
+            // wrong and under-reports the tail: a fleet of fast bots dilutes a
+            // single slow bot's p99 toward the fast value, hiding the real tail
+            // latency the leaderboard exists to surface. Merging the raw HDR
+            // sample distributions and reading the quantile off the combined
+            // histogram is exact (the same number Timescale's view computes).
+            let mut merged = LatencyHistogram::new();
             for (bot_id, b) in state.bots.into_iter() {
                 let p50 = b.histogram.percentile_ms(0.50);
                 let p90 = b.histogram.percentile_ms(0.90);
                 let p99 = b.histogram.percentile_ms(0.99);
                 let p999 = b.histogram.percentile_ms(0.999);
+                merged.merge(&b.histogram);
                 totals.orders_sent += b.orders_sent;
                 totals.acks_received += b.acks_received;
                 totals.fills_received += b.fills_received;
@@ -367,11 +404,10 @@ impl Aggregator {
             }
             bots.sort_by(|a, b| a.bot_id.cmp(&b.bot_id));
 
-            // Aggregate run-wide percentiles by merging per-bot quantile
-            // estimates weighted by sample count. This is approximate but
-            // good enough for a horizontal-slice surface; live mode reads
-            // the authoritative quantiles from Timescale.
-            let (p50, p90, p99, p999) = approx_global_percentiles(&bots);
+            let p50 = merged.percentile_ms(0.50);
+            let p90 = merged.percentile_ms(0.90);
+            let p99 = merged.percentile_ms(0.99);
+            let p999 = merged.percentile_ms(0.999);
 
             // Canonical average TPS (TM-4/TM-5/R5): acks over the OBSERVED span
             // (last_ack - first_ack), which is the same definition the bot-fleet
@@ -421,30 +457,6 @@ struct BotTotals {
     timeouts: u64,
     errors: u64,
     histogram_count: u64,
-}
-
-fn approx_global_percentiles(bots: &[BotSummary]) -> (f64, f64, f64, f64) {
-    // Weighted average of per-bot percentile values by ack count. Cheap and
-    // close enough for horizontal-slice reporting; Timescale view supplies
-    // the precise number in live mode.
-    let mut sums = [0.0_f64; 4];
-    let mut weight = 0_u64;
-    for b in bots {
-        let w = b.acks_received;
-        if w == 0 {
-            continue;
-        }
-        weight += w;
-        sums[0] += b.p50_ms * w as f64;
-        sums[1] += b.p90_ms * w as f64;
-        sums[2] += b.p99_ms * w as f64;
-        sums[3] += b.p999_ms * w as f64;
-    }
-    if weight == 0 {
-        return (0.0, 0.0, 0.0, 0.0);
-    }
-    let w = weight as f64;
-    (sums[0] / w, sums[1] / w, sums[2] / w, sums[3] / w)
 }
 
 #[derive(Debug, Serialize)]
@@ -702,5 +714,113 @@ mod tests {
             .find(|r| r.run_id == "r1")
             .expect("run survives");
         assert_eq!(r.bots_dropped, 25);
+    }
+
+    /// Build a distinct ack (unique seq_no + recv_ts_ns) so the dedup gate never
+    /// collapses it with another — used to feed real per-bot latency samples.
+    fn ack(run: &str, bot: &str, seq: u64, recv_ts_ns: u64, latency_ns: u64) -> TelemetryEvent {
+        TelemetryEvent {
+            run_id: run.to_string(),
+            bot_id: bot.to_string(),
+            seq_no: seq,
+            client_order_id: format!("o{seq}"),
+            event_type: EventKind::AckReceived,
+            send_ts_ns: recv_ts_ns.saturating_sub(latency_ns),
+            recv_ts_ns,
+            latency_ns,
+        }
+    }
+
+    #[test]
+    fn run_percentiles_use_merged_histogram_not_weighted_average() {
+        // #11: 9 fast bots (100 acks @ 5ms each) + 1 slow bot (100 acks @ 500ms).
+        // The slow bot is 10% of the 1000-sample distribution, so the true
+        // run-wide p99/p999 must sit in the 500ms region. An ack-weighted
+        // average of per-bot quantiles would instead report ~(900*5 +
+        // 100*500)/1000 = ~54.5ms, hiding the tail. The merged histogram gets
+        // this right.
+        let mut agg = Aggregator::new(None);
+        let mut seq = 0u64;
+        let mut ts = 1_000_000_000u64;
+        for bot in 0..9 {
+            for _ in 0..100 {
+                seq += 1;
+                ts += 1;
+                agg.record(&ack("r1", &format!("fast-{bot}"), seq, ts, 5_000_000));
+            }
+        }
+        for _ in 0..100 {
+            seq += 1;
+            ts += 1;
+            agg.record(&ack("r1", "slow", seq, ts, 500_000_000));
+        }
+        let summary = agg.finalize();
+        let r = &summary.runs[0];
+        assert_eq!(r.acks_received, 1000);
+        // Bulk (90%) at 5ms -> p50 fast.
+        assert!((r.p50_ms - 5.0).abs() < 1.0, "p50 was {}", r.p50_ms);
+        // Tail must reflect the slow bot, not the ~54ms weighted average.
+        assert!(
+            r.p99_ms >= 450.0,
+            "p99 must surface the slow tail (~500ms), was {} (weighted-avg bug would give ~54ms)",
+            r.p99_ms
+        );
+        assert!(r.p999_ms >= 450.0, "p999 was {}", r.p999_ms);
+    }
+
+    #[test]
+    fn dropped_bot_acks_do_not_inflate_average_tps_window() {
+        // #29: once a run is at MAX_BOTS_PER_RUN, a new bot's acks are dropped.
+        // Such an ack must contribute to NEITHER the average-tps numerator (sum
+        // over stored bots) NOR its divisor (the observed span / tps_counter),
+        // otherwise the dropped ack widens the span while never being summed,
+        // biasing average TPS low. Fill the bot cap with order_sent (no acks),
+        // then send two real acks 1s apart from a stored bot and one ack from an
+        // over-cap bot at a far-later timestamp.
+        let mut agg = Aggregator::new(None);
+        for i in 0..MAX_BOTS_PER_RUN {
+            agg.record(&evt("r1", &format!("bot-{i}"), EventKind::OrderSent, 0));
+        }
+        // Two acks from an admitted bot, 1s apart -> span = 1s, 2 acks.
+        agg.record(&ack("r1", "bot-0", 1, 1_000_000_000, 1_000_000));
+        agg.record(&ack("r1", "bot-0", 2, 2_000_000_000, 1_000_000));
+        // An over-cap bot's ack 1000s later: dropped, must not widen the span.
+        agg.record(&ack("r1", "way-over-cap", 3, 1_002_000_000_000, 1_000_000));
+
+        let summary = agg.finalize();
+        let r = &summary.runs[0];
+        assert_eq!(r.acks_received, 2, "only stored-bot acks are summed");
+        assert_eq!(r.bots_dropped, 1);
+        // Span is 1s (2s - 1s), not ~1000s; divisor stays consistent with the
+        // numerator so average TPS = 2 acks / 1s = 2, not 2/1000.
+        assert!(
+            (r.duration_secs - 1.0).abs() < 1e-6,
+            "span must exclude the dropped-bot ack, was {}",
+            r.duration_secs
+        );
+        assert!((r.tps - 2.0).abs() < 1e-6, "avg tps was {}", r.tps);
+        // peak_tps likewise excludes the dropped ack (1 ack/second peak).
+        assert_eq!(r.peak_tps, 1.0);
+    }
+
+    #[test]
+    fn dedup_gated_to_acks_only() {
+        // #8: re-delivered acks are still deduped (idempotent peak_tps +
+        // percentiles), but order_sent/fill no longer pay the dedup probe. A
+        // byte-identical re-delivered fill is NOT deduped (it just re-tallies a
+        // monotone counter), proving the gate skipped it.
+        let mut agg = Aggregator::new(None);
+        let the_ack = ack("r1", "b1", 1, 1_000_000_000, 1_000_000);
+        agg.record(&the_ack);
+        agg.record(&the_ack); // re-delivered ack -> deduped
+        let mut fill = evt("r1", "b1", EventKind::FillReceived, 0);
+        fill.recv_ts_ns = 5_000;
+        agg.record(&fill);
+        agg.record(&fill); // re-delivered fill -> NOT deduped (gate skips fills)
+        let summary = agg.finalize();
+        let r = &summary.runs[0];
+        assert_eq!(r.acks_received, 1, "duplicate ack deduped");
+        assert_eq!(r.duplicates_dropped, 1, "only the ack counts as a duplicate");
+        assert_eq!(r.fills_received, 2, "fills are not deduped after the #8 gate");
     }
 }

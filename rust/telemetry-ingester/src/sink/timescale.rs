@@ -1,4 +1,6 @@
+use std::collections::VecDeque;
 use std::fmt::Write as _;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -30,15 +32,18 @@ pub async fn spawn(
     url: String,
     flush_ms: u64,
     batch_size: usize,
-) -> Result<mpsc::Sender<TelemetryEvent>> {
+) -> Result<mpsc::Sender<Arc<TelemetryEvent>>> {
     let pool: PgPool = PgPoolOptions::new()
         .max_connections(8)
         .connect(&url)
         .await
         .with_context(|| format!("connecting timescale {url}"))?;
-    let (tx, mut rx) = mpsc::channel::<TelemetryEvent>(16_384);
+    let (tx, mut rx) = mpsc::channel::<Arc<TelemetryEvent>>(16_384);
     tokio::spawn(async move {
-        let mut buf: Vec<TelemetryEvent> = Vec::with_capacity(batch_size);
+        // VecDeque so the drop-oldest cap is O(1) (`pop_front`) instead of the
+        // O(n) `Vec::remove(0)` memmove that pinned a CPU once the buffer filled
+        // during a DB outage (~500k structs shifted per incoming event).
+        let mut buf: VecDeque<Arc<TelemetryEvent>> = VecDeque::with_capacity(batch_size);
         let mut ticker = interval(Duration::from_millis(flush_ms.max(50)));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         // DB-down state (R3): when the DB is unreachable we back off rather than
@@ -54,9 +59,9 @@ pub async fn spawn(
                     match maybe {
                         Some(e) => {
                             // Buffer cap: drop-oldest past the limit so a DB
-                            // outage can't grow the buffer without bound.
-                            if buf.len() >= MAX_BUFFERED_EVENTS {
-                                buf.remove(0);
+                            // outage can't grow the buffer without bound. The
+                            // eviction is O(1) (`pop_front` on a VecDeque).
+                            if push_with_cap(&mut buf, e, MAX_BUFFERED_EVENTS) {
                                 events_dropped += 1;
                                 if events_dropped.is_power_of_two() {
                                     tracing::warn!(
@@ -66,7 +71,6 @@ pub async fn spawn(
                                     );
                                 }
                             }
-                            buf.push(e);
                             // Only attempt a flush when full AND we're not in a
                             // backoff window — otherwise we'd re-COPY the whole
                             // buffer on every push while the DB is down.
@@ -102,7 +106,7 @@ pub async fn spawn(
 /// the next attempt waits instead of hammering the DB / re-COPYing per push.
 async fn try_flush(
     pool: &PgPool,
-    buf: &mut Vec<TelemetryEvent>,
+    buf: &mut VecDeque<Arc<TelemetryEvent>>,
     backoff: &mut Duration,
     retry_after: &mut Option<Instant>,
 ) {
@@ -119,7 +123,7 @@ async fn try_flush(
     }
 }
 
-async fn flush(pool: &PgPool, buf: &mut Vec<TelemetryEvent>) -> Result<()> {
+async fn flush(pool: &PgPool, buf: &mut VecDeque<Arc<TelemetryEvent>>) -> Result<()> {
     if buf.is_empty() {
         return Ok(());
     }
@@ -237,5 +241,59 @@ fn event_kind_str(k: EventKind) -> &'static str {
         EventKind::FillReceived => "fill_received",
         EventKind::Timeout => "timeout",
         EventKind::Error => "error",
+    }
+}
+
+/// Push `e` onto the back of the buffer, evicting the oldest (front) entry first
+/// if the buffer is already at `cap`. Eviction is O(1) (`VecDeque::pop_front`),
+/// so a DB outage that pins the buffer at the cap no longer costs an O(n)
+/// memmove per incoming event. Returns `true` when an event was dropped.
+fn push_with_cap(
+    buf: &mut VecDeque<Arc<TelemetryEvent>>,
+    e: Arc<TelemetryEvent>,
+    cap: usize,
+) -> bool {
+    let dropped = buf.len() >= cap;
+    if dropped {
+        buf.pop_front();
+    }
+    buf.push_back(e);
+    dropped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ev(seq_no: u64) -> Arc<TelemetryEvent> {
+        Arc::new(TelemetryEvent {
+            run_id: "r".to_string(),
+            bot_id: "b".to_string(),
+            client_order_id: String::new(),
+            event_type: EventKind::AckReceived,
+            seq_no,
+            latency_ns: 0,
+            send_ts_ns: 0,
+            recv_ts_ns: 0,
+        })
+    }
+
+    #[test]
+    fn push_with_cap_drops_oldest_and_keeps_freshest() {
+        let cap = 3;
+        let mut buf: VecDeque<Arc<TelemetryEvent>> = VecDeque::new();
+        // Fill to the cap: no drops.
+        for i in 0..cap as u64 {
+            assert!(!push_with_cap(&mut buf, ev(i), cap));
+        }
+        assert_eq!(buf.len(), cap);
+        // Past the cap each push drops exactly one oldest event; len stays capped.
+        for i in cap as u64..(cap as u64 + 5) {
+            assert!(push_with_cap(&mut buf, ev(i), cap));
+            assert_eq!(buf.len(), cap);
+        }
+        // The buffer holds the freshest `cap` events, oldest-first.
+        let seqs: Vec<u64> = buf.iter().map(|e| e.seq_no).collect();
+        assert_eq!(seqs, vec![5, 6, 7]);
     }
 }

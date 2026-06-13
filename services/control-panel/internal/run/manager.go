@@ -250,6 +250,17 @@ func (m *Manager) execute(ctx context.Context, r *BenchmarkRun) {
 		return
 	}
 
+	// Recheck cancellation before committing FINISHED. CancelRun can fire
+	// concurrently and persist CANCELLED; without this recheck the happy path
+	// would race it and silently overwrite the cancelled run to FINISHED. Route
+	// through failOrCancel() so the in-memory run and the store agree on the
+	// terminal state. (The store's terminal-state guard is the backstop if the
+	// cancel lands after this check.)
+	if err := ctx.Err(); err != nil {
+		m.failOrCancel(ctx, r, "SCORING", err)
+		return
+	}
+
 	finishedAt := time.Now()
 	r.Status = StatusFinished
 	r.FinishedAt = &finishedAt

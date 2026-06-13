@@ -102,6 +102,20 @@ func (b *Board) List() []Entry {
 	return b.snapshotLocked()
 }
 
+// seedSubscriber delivers the initial snapshot to a freshly registered
+// subscriber channel. It MUST be non-blocking, exactly like the Upsert
+// broadcast path: the channel is registered before the seed, so a concurrent
+// Upsert can fill the buffer in the unlock->seed window. A blocking send here
+// would wedge Subscribe forever (leaking the WebSocket goroutine and the
+// subscriber-map entry). Dropping the seed is safe — the next broadcast
+// delivers a fresh snapshot.
+func seedSubscriber(ch chan []byte, payload []byte) {
+	select {
+	case ch <- payload:
+	default:
+	}
+}
+
 func (b *Board) Subscribe() (<-chan []byte, func()) {
 	ch := make(chan []byte, 8)
 	b.mu.Lock()
@@ -110,7 +124,7 @@ func (b *Board) Subscribe() (<-chan []byte, func()) {
 	payload, _ := json.Marshal(snapshot)
 	b.mu.Unlock()
 
-	ch <- payload
+	seedSubscriber(ch, payload)
 	// cancel only unregisters; it must NOT close(ch). Upsert snapshots the
 	// subscriber list under the lock but sends after unlock, so a close here
 	// races that send (panic: send on closed channel, caught by go test

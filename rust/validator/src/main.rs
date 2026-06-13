@@ -8,6 +8,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Parser;
 use reference_orderbook::Fill;
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 mod compare;
@@ -114,7 +115,10 @@ fn read_actual_fills(path: &PathBuf) -> Result<(Vec<ActualFill>, Vec<usize>)> {
             continue;
         };
 
-        let fill: Fill = serde_json::from_value(fill_value.clone())
+        // Deserialize from the borrowed sub-Value (`&Value: Deserializer`)
+        // instead of `from_value(fill_value.clone())`, which deep-cloned the
+        // JSON on every fill line (the hot path at 10M fills).
+        let fill = Fill::deserialize(fill_value)
             .with_context(|| format!("decode fill at line {}", line_no + 1))?;
         let engine_seq = fill.engine_seq;
 

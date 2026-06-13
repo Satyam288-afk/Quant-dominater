@@ -130,19 +130,20 @@ pub fn compose(inputs: ScoreInputs) -> CompositeScore {
     let resource = resource_efficiency_score(inputs.cpu_pct, inputs.mem_mb);
     // Completion gate (DYN-3): the fraction of sent orders that actually
     // completed. An engine that acks 1 order and ignores the rest has a
-    // statistically meaningless latency sample, so below 50% completion we
-    // scale the latency credit by completion BEFORE composing — it can't bank
-    // the full 40% latency weight on a single ack. Healthy engines
-    // (completion >= 0.5) are unchanged. Mirrors the Go scorers.
+    // statistically meaningless latency sample, so we scale the latency credit
+    // by a CONTINUOUS ramp BEFORE composing — it can't bank the full 40%
+    // latency weight on a single ack. factor = min(1, completion / 0.5):
+    // 1.0 for completion >= 0.5 (healthy engines unchanged, continuous at 0.5)
+    // and ramps linearly 0->1 over completion in [0, 0.5] (no cliff; still
+    // kills the 'one ack' exploit). Mirrors the Go scorers.
     let completion = if inputs.orders_sent > 0 {
         (1.0 - (inputs.timeouts + inputs.connect_errors) as f64 / inputs.orders_sent as f64)
             .clamp(0.0, 1.0)
     } else {
         0.0
     };
-    if completion < 0.5 {
-        latency = round2(latency * completion);
-    }
+    let factor = (completion / 0.5).min(1.0);
+    latency = round2(latency * factor);
     let final_score =
         round2(0.40 * latency + 0.30 * throughput + 0.20 * stability + 0.10 * resource);
     CompositeScore {
@@ -238,9 +239,9 @@ mod tests {
     #[test]
     fn completion_gate_scales_latency_for_low_completion() {
         // DYN-3: a "1 ack, ignore the rest" engine — 1000 orders, 990 timeouts
-        // -> completion 0.01. Even a floor-level p99 (latency_score 100) must
-        // be gated to 100 * 0.01 = 1.0 before composing, so it can't bank the
-        // full 40% latency weight on a statistically meaningless sample.
+        // -> completion 0.01. A floor-level p99 (latency_score 100) is ramped
+        // by factor = min(1, 0.01/0.5) = 0.02 -> 2.0 before composing, so it
+        // can't bank the full 40% latency weight on a meaningless sample.
         let s = compose(ScoreInputs {
             valid: true,
             p99_ms: 0.05, // latency_score == 100 before gating
@@ -252,11 +253,11 @@ mod tests {
             cpu_pct: None,
             mem_mb: None,
         });
-        // completion = 1 - 990/1000 = 0.01 < 0.5 -> latency gated to 1.0.
-        assert_eq!(s.latency_score, 1.0);
+        // completion = 0.01 -> factor 0.02 -> latency ramped to 2.0.
+        assert_eq!(s.latency_score, 2.0);
 
         // A healthy engine (completion >= 0.5) is unchanged: 1000 orders, 10
-        // timeouts -> completion 0.99, latency_score stays at the raw value.
+        // timeouts -> completion 0.99, factor 1.0, latency stays at raw value.
         let healthy = compose(ScoreInputs {
             valid: true,
             p99_ms: 0.05,
@@ -270,7 +271,7 @@ mod tests {
         });
         assert_eq!(healthy.latency_score, 100.0);
 
-        // Exactly at the 0.5 boundary -> NOT gated (>= 0.5 is healthy).
+        // Exactly at the 0.5 boundary -> factor 1.0, NOT scaled down.
         let boundary = compose(ScoreInputs {
             valid: true,
             p99_ms: 0.05,
@@ -283,5 +284,39 @@ mod tests {
             mem_mb: None,
         });
         assert_eq!(boundary.latency_score, 100.0);
+    }
+
+    #[test]
+    fn completion_gate_is_continuous_at_half() {
+        // The old hard gate produced a ~20-point final-score cliff between
+        // completion 0.5 and 0.499. The continuous ramp must make 0.5 and
+        // 0.499 give nearly-equal final scores (no discontinuity that can
+        // invert rankings).
+        let base = ScoreInputs {
+            valid: true,
+            p99_ms: 0.05, // latency_score == 100 before gating
+            tps: 0.0,
+            expected_tps: 0.0,
+            orders_sent: 1000,
+            timeouts: 0,
+            connect_errors: 0,
+            cpu_pct: None,
+            mem_mb: None,
+        };
+        // completion = 0.500 (500 timeouts) and completion = 0.499 (501).
+        let at_half = compose(ScoreInputs {
+            timeouts: 500,
+            ..base
+        });
+        let just_below = compose(ScoreInputs {
+            timeouts: 501,
+            ..base
+        });
+        assert!(
+            (at_half.final_score - just_below.final_score).abs() < 0.1,
+            "expected continuity at completion=0.5: {} vs {}",
+            at_half.final_score,
+            just_below.final_score
+        );
     }
 }

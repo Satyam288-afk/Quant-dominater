@@ -1,12 +1,21 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 
 use crate::types::{Fill, NewOrder, Order, OrderBookError, OrderType, Side};
 
+/// Per-level priority key. Orders at a price level are filled in ascending
+/// `(ts_ns, insert_seq)` order, so a `BTreeMap` keyed on it makes the front of
+/// the queue (the next to fill) `iter().next()`, and lets `cancel` remove a
+/// specific resting order in O(log depth) instead of scanning the level.
+type LevelKey = (u64, u64);
+type Level = BTreeMap<LevelKey, Order>;
+
 #[derive(Debug, Default)]
 pub struct OrderBook {
-    buys: BTreeMap<i64, VecDeque<Order>>,
-    sells: BTreeMap<i64, VecDeque<Order>>,
-    index: HashMap<String, (Side, i64)>,
+    buys: BTreeMap<i64, Level>,
+    sells: BTreeMap<i64, Level>,
+    /// `client_order_id -> (side, price, level_key)`. Storing the level key
+    /// lets `cancel` go straight to the resting order without scanning.
+    index: HashMap<String, (Side, i64, LevelKey)>,
     insert_seq: u64,
 }
 
@@ -58,7 +67,7 @@ impl OrderBook {
     }
 
     pub fn cancel(&mut self, order_id: &str) -> bool {
-        let Some((side, price)) = self.index.remove(order_id) else {
+        let Some((side, price, key)) = self.index.remove(order_id) else {
             return false;
         };
         let book = match side {
@@ -68,9 +77,8 @@ impl OrderBook {
         let level_empty = match book.get_mut(&price) {
             None => return false,
             Some(level) => {
-                if let Some(pos) = level.iter().position(|o| o.order_id == order_id) {
-                    level.remove(pos);
-                }
+                // O(log depth) removal via the stored priority key.
+                level.remove(&key);
                 level.is_empty()
             }
         };
@@ -93,19 +101,15 @@ impl OrderBook {
             Side::Buy => &mut self.buys,
             Side::Sell => &mut self.sells,
         };
+        // (ts_ns, insert_seq) is unique per resting order (insert_seq is a
+        // monotonic counter), so it doubles as the level's priority key and a
+        // stable handle for cancel. The BTreeMap keeps the level ordered, so
+        // the front (next to fill) is `iter().next()`.
+        let key: LevelKey = (order.ts_ns, order.insert_seq);
         self.index
-            .insert(order.order_id.clone(), (order.side, order.price));
+            .insert(order.order_id.clone(), (order.side, order.price, key));
         let level = book.entry(order.price).or_default();
-        // Maintain (ts_ns, insert_seq) ascending order so the front of the
-        // queue is always the next to be filled.
-        let pos = level
-            .iter()
-            .rposition(|existing| {
-                (existing.ts_ns, existing.insert_seq) <= (order.ts_ns, order.insert_seq)
-            })
-            .map(|p| p + 1)
-            .unwrap_or(0);
-        level.insert(pos, order);
+        level.insert(key, order);
     }
 
     fn match_buy(&mut self, active: &mut Order, market: bool) -> Vec<Fill> {
@@ -121,7 +125,8 @@ impl OrderBook {
             let mut filled_id: Option<String> = None;
             {
                 let level = self.sells.get_mut(&best_price).expect("level exists");
-                let resting = level.front_mut().expect("level non-empty");
+                let (&front_key, resting) =
+                    level.iter_mut().next().expect("level non-empty");
                 let qty = active.qty.min(resting.qty);
                 let fill = Fill {
                     buy_order_id: active.order_id.clone(),
@@ -134,7 +139,7 @@ impl OrderBook {
                 resting.qty -= qty;
                 if resting.qty == 0 {
                     filled_id = Some(resting.order_id.clone());
-                    level.pop_front();
+                    level.remove(&front_key);
                 }
                 level_empty = level.is_empty();
                 fills.push(fill);
@@ -162,7 +167,8 @@ impl OrderBook {
             let mut filled_id: Option<String> = None;
             {
                 let level = self.buys.get_mut(&best_price).expect("level exists");
-                let resting = level.front_mut().expect("level non-empty");
+                let (&front_key, resting) =
+                    level.iter_mut().next().expect("level non-empty");
                 let qty = active.qty.min(resting.qty);
                 let fill = Fill {
                     buy_order_id: resting.order_id.clone(),
@@ -175,7 +181,7 @@ impl OrderBook {
                 resting.qty -= qty;
                 if resting.qty == 0 {
                     filled_id = Some(resting.order_id.clone());
-                    level.pop_front();
+                    level.remove(&front_key);
                 }
                 level_empty = level.is_empty();
                 fills.push(fill);
@@ -284,6 +290,32 @@ mod tests {
         assert_eq!(fills[0].price, 10030);
         assert_eq!(fills[1].sell_order_id, "sell_high");
         assert_eq!(fills[1].price, 10050);
+    }
+
+    #[test]
+    fn cancel_middle_of_level_preserves_time_priority() {
+        // Three resting buys at the same price; cancel the middle one. The
+        // BTreeMap-keyed level must remove exactly that order (by its stable
+        // (ts_ns, insert_seq) handle) and keep the other two in time order.
+        let mut book = OrderBook::new();
+        book.process_new_order(limit("buy_first", Side::Buy, 100, 5, 1))
+            .unwrap();
+        book.process_new_order(limit("buy_mid", Side::Buy, 100, 5, 2))
+            .unwrap();
+        book.process_new_order(limit("buy_last", Side::Buy, 100, 5, 3))
+            .unwrap();
+
+        assert!(book.cancel("buy_mid"));
+        assert_eq!(book.buy_depth(), 2);
+        assert!(!book.cancel("buy_mid"));
+
+        // A sell sweeping both remaining buys must fill first then last.
+        let fills = book
+            .process_new_order(limit("sell_sweep", Side::Sell, 100, 10, 4))
+            .unwrap();
+        assert_eq!(fills.len(), 2);
+        assert_eq!(fills[0].buy_order_id, "buy_first");
+        assert_eq!(fills[1].buy_order_id, "buy_last");
     }
 
     #[test]

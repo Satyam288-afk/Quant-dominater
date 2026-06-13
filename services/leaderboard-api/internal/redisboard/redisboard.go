@@ -165,6 +165,20 @@ func (b *Board) List() []board.Entry {
 	return out
 }
 
+// seedSubscriber delivers the initial snapshot to a freshly registered
+// subscriber channel. It MUST be non-blocking, exactly like the refresh()
+// broadcast path: the channel is registered before the seed, so a concurrent
+// refresh() can fill the buffer in the unlock->seed window. A blocking send
+// here would wedge Subscribe forever (leaking the WebSocket goroutine and the
+// subscriber-map entry). Dropping the seed is safe — the next refresh()
+// broadcast delivers a fresh snapshot.
+func seedSubscriber(ch chan []byte, payload []byte) {
+	select {
+	case ch <- payload:
+	default:
+	}
+}
+
 // Subscribe registers a WebSocket subscriber and immediately seeds it with the
 // current snapshot.
 func (b *Board) Subscribe() (<-chan []byte, func()) {
@@ -177,7 +191,7 @@ func (b *Board) Subscribe() (<-chan []byte, func()) {
 	}
 	b.mu.Unlock()
 
-	ch <- payload
+	seedSubscriber(ch, payload)
 	// cancel only unregisters; it must NOT close(ch). refresh() snapshots the
 	// subscriber list under the lock but sends after unlock, so a close here
 	// races that send (send on closed channel would kill the background
@@ -230,10 +244,38 @@ func (b *Board) Upsert(entry board.Entry) ([]board.Entry, error) {
 
 // LiveRunMetrics returns the ingester's in-flight counters for a run, used by
 // the /runs/{id}/live endpoint to show progress before a run is scored.
+//
+// `avg_latency_ms` is derived here from the cross-pod cumulative
+// `latency_sum_ns` / `latency_count` (which the ingester HINCRBY-merges) rather
+// than materialized by the writer. Deriving on read removes the extra HMGET +
+// HSET round-trips per run per flush and the cross-pod race where a published
+// avg could reflect a snapshot taken before another pod's increment landed —
+// here the avg is always consistent with the sum/count in the same HGETALL.
 func (b *Board) LiveRunMetrics(runID string) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	return b.rdb.HGetAll(ctx, "run:"+runID+":metrics").Result()
+	m, err := b.rdb.HGetAll(ctx, "run:"+runID+":metrics").Result()
+	if err != nil {
+		return m, err
+	}
+	deriveAvgLatencyMs(m)
+	return m, nil
+}
+
+// deriveAvgLatencyMs sets `avg_latency_ms` in the live metrics map from
+// `latency_sum_ns` / `latency_count` (ns -> ms). A zero/absent/unparsable count
+// yields 0 so we never divide by zero.
+func deriveAvgLatencyMs(m map[string]string) {
+	if m == nil {
+		return
+	}
+	sumNs, errSum := strconv.ParseFloat(m["latency_sum_ns"], 64)
+	count, errCount := strconv.ParseFloat(m["latency_count"], 64)
+	avg := 0.0
+	if errSum == nil && errCount == nil && count > 0 {
+		avg = (sumNs / count) / 1_000_000.0
+	}
+	m["avg_latency_ms"] = strconv.FormatFloat(avg, 'f', -1, 64)
 }
 
 // RunTimeseries returns the per-second latency/throughput series for a run as a

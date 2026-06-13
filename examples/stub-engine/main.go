@@ -168,6 +168,22 @@ func (e *Engine) RejectAck(reason string) Ack {
 	}
 }
 
+// rejectResidual reconciles the ack with the resting-cap drop so it can never
+// contradict the fills the caller emits. If the order produced ZERO fills, the
+// whole order is rejected (book_full). If it DID match (the cap only stopped the
+// unmatched residual from resting), the ack stays accepted with a distinct
+// reason — emitting a "rejected" ack alongside real fills for the same order
+// would be self-contradictory. Either way the residual never rests, so a later
+// cancel correctly returns not_found.
+func rejectResidual(ack *Ack, deliveries []FillDelivery) {
+	if len(deliveries) == 0 {
+		ack.Status = "rejected"
+		ack.Reason = "book_full"
+		return
+	}
+	ack.Reason = "residual_dropped"
+}
+
 func (e *Engine) ProcessNew(in NewOrder, owner *Client) (Ack, []FillDelivery) {
 	side := strings.ToUpper(in.Side)
 	orderType := strings.ToUpper(in.OrderType)
@@ -238,17 +254,16 @@ func (e *Engine) ProcessNew(in NewOrder, owner *Client) (Ack, []FillDelivery) {
 		if active.Qty > 0 && orderType != "MARKET" {
 			// Cap resting depth: an unbounded book makes the front-insert
 			// quadratic and pins memory. The residual matched as far as it
-			// could; if it cannot rest (cap hit), the ack must say "rejected"
-			// (book_full) instead of "accepted" — otherwise a later cancel
-			// returns not_found for an order the ack claimed had rested. The
-			// cap is far above any legitimate depth, so this never fires in the
-			// proof or normal play; only an abusive flood reaches it.
+			// could; if it cannot rest (cap hit), the ack must reflect that the
+			// residual was dropped — otherwise a later cancel returns not_found
+			// for an order the ack claimed had rested. The cap is far above any
+			// legitimate depth, so this never fires in the proof or normal play;
+			// only an abusive flood reaches it.
 			if len(book.buys) < maxRestingPerSymbol {
 				insertSorted(&book.buys, active, true, broken)
 				e.index.Store(active.ID, active)
 			} else {
-				ack.Status = "rejected"
-				ack.Reason = "book_full"
+				rejectResidual(&ack, deliveries)
 			}
 		}
 	} else {
@@ -258,8 +273,7 @@ func (e *Engine) ProcessNew(in NewOrder, owner *Client) (Ack, []FillDelivery) {
 				insertSorted(&book.sells, active, false, broken)
 				e.index.Store(active.ID, active)
 			} else {
-				ack.Status = "rejected"
-				ack.Reason = "book_full"
+				rejectResidual(&ack, deliveries)
 			}
 		}
 	}
@@ -455,6 +469,15 @@ func (e *Engine) matchSell(book *Book, active *Order, market bool) []FillDeliver
 type Client struct {
 	conn *websocket.Conn
 	mu   sync.Mutex
+
+	// Disruptor-mode outbound decoupling (unused by the mutex path, which still
+	// calls SendJSON synchronously). The matcher must never block on a client
+	// socket, so in disruptor mode every payload is handed to this bounded
+	// per-connection queue and drained by a dedicated writer goroutine; see
+	// (*Client).enqueue in disruptor.go.
+	outQ       chan any
+	outInit    sync.Once
+	outDropped atomic.Uint64
 }
 
 func (c *Client) SendJSON(v any) error {

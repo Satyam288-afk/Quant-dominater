@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+#[cfg(any(feature = "timescale", feature = "redis-backend"))]
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -162,6 +164,16 @@ async fn main() -> Result<()> {
 
     let mut rx = rx;
     let mut events_seen: u64 = 0;
+    // Best-effort live sinks: count events shed when a sink's bounded channel is
+    // full (it's busy with a COPY or backed off during an outage). We `try_send`
+    // rather than `.await` the send so a slow/backed-off sink can't stall this
+    // drain loop — which would back up the source and, in Kafka mode, stop the
+    // consumer from polling/committing. The authoritative path is the
+    // aggregator + finalize; the sinks are explicitly best-effort live views.
+    #[cfg(feature = "timescale")]
+    let mut timescale_dropped: u64 = 0;
+    #[cfg(feature = "redis-backend")]
+    let mut redis_dropped: u64 = 0;
     // Bounded shutdown grace: on signal we keep draining buffered events (the
     // Kafka source commits and closes its sender, so rx reaches `None` quickly),
     // but cap the wait so a wedged source can't block shutdown forever.
@@ -186,13 +198,41 @@ async fn main() -> Result<()> {
                     Some(e) => {
                         aggregator.record(&e);
                         events_seen += 1;
+                        // Fan out to the live sinks via Arc so each sink gets a
+                        // cheap atomic-refcount bump instead of a deep clone of
+                        // the event's String fields (~30M allocs/s at peak).
+                        // `try_send` (not `.await`): a full sink channel means
+                        // that sink is busy/backed off — we drop for it and move
+                        // on rather than block the aggregator and the Kafka
+                        // offset commit. Drops are counted + logged (rate-limited
+                        // to powers of two) so the loss is observable. The redis
+                        // and timescale sends are independent — neither blocks
+                        // the other.
+                        #[cfg(any(feature = "timescale", feature = "redis-backend"))]
+                        let e = Arc::new(e);
                         #[cfg(feature = "timescale")]
                         if let Some(tx) = &timescale_tx {
-                            let _ = tx.send(e.clone()).await;
+                            if tx.try_send(Arc::clone(&e)).is_err() {
+                                timescale_dropped += 1;
+                                if timescale_dropped.is_power_of_two() {
+                                    tracing::warn!(
+                                        dropped = timescale_dropped,
+                                        "timescale sink channel full (busy/backed off); dropping live-view events"
+                                    );
+                                }
+                            }
                         }
                         #[cfg(feature = "redis-backend")]
                         if let Some(tx) = &redis_tx {
-                            let _ = tx.send(e).await;
+                            if tx.try_send(Arc::clone(&e)).is_err() {
+                                redis_dropped += 1;
+                                if redis_dropped.is_power_of_two() {
+                                    tracing::warn!(
+                                        dropped = redis_dropped,
+                                        "redis sink channel full (busy/backed off); dropping live-view events"
+                                    );
+                                }
+                            }
                         }
                     }
                     None => break,

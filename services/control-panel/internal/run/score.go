@@ -43,12 +43,15 @@ func CalculateScore(r *BenchmarkRun) ScoreResult {
 	// unconditional hardcode), keeping this path identical to the other scorers.
 	result.ResourceScore = resourceScore(0, 0)
 	// Completion gate (DYN-3): an engine that acks only a sliver of the offered
-	// orders has a statistically meaningless latency sample. Below 50% completion
-	// we scale the (40%-weighted) latency credit by the completion fraction so a
-	// "1 ack, ignore the rest" engine can't bank near-full latency points.
-	if completion := completionFraction(metrics.OrdersSent, metrics.Timeouts, metrics.ConnectErrors); completion < 0.5 {
-		result.LatencyScore = round2(result.LatencyScore * completion)
-	}
+	// orders has a statistically meaningless latency sample. We scale the
+	// (40%-weighted) latency credit by a CONTINUOUS ramp so a "1 ack, ignore the
+	// rest" engine can't bank near-full latency points. factor = min(1,
+	// completion/0.5): 1.0 for completion >= 0.5 (healthy engines unchanged,
+	// continuous at 0.5) and ramps linearly 0->1 over completion in [0, 0.5]
+	// (no cliff; still kills the 'one ack' exploit).
+	completion := completionFraction(metrics.OrdersSent, metrics.Timeouts, metrics.ConnectErrors)
+	factor := math.Min(completion/0.5, 1.0)
+	result.LatencyScore = round2(result.LatencyScore * factor)
 	result.Score = round2(
 		0.40*result.LatencyScore +
 			0.30*result.ThroughputScore +
