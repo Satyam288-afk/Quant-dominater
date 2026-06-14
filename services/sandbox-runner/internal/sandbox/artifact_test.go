@@ -61,8 +61,6 @@ func TestDefaultDockerfilePerLanguage(t *testing.T) {
 	cases := map[string]string{
 		"go":     "golang:1.22-alpine",
 		"rust":   "rust:1-slim",
-		"cpp":    "gcc:13",
-		"c++":    "gcc:13",
 		"binary": "COPY engine /engine",
 	}
 	for language, marker := range cases {

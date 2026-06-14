@@ -173,29 +173,6 @@ COPY --from=build /out/engine /engine
 EXPOSE 8080
 ENTRYPOINT ["/engine"]
 `
-	case "cpp", "c++", "cxx":
-		// Convention: CMake target or Makefile producing a binary, else all
-		// translation units are compiled straight to /engine.
-		content = `FROM gcc:13 AS build
-WORKDIR /src
-COPY . .
-RUN set -eux; \
-    if [ -f CMakeLists.txt ]; then \
-        apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*; \
-        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j; \
-        find build -maxdepth 3 -type f -perm -111 -exec cp {} /engine \; -quit; \
-    elif [ -f Makefile ]; then \
-        make && cp engine /engine; \
-    else \
-        g++ -O2 -std=c++20 -pthread -o /engine $(find . -name '*.cpp' -o -name '*.cc'); \
-    fi
-
-FROM debian:stable-slim
-WORKDIR /app
-COPY --from=build /engine /engine
-EXPOSE 8080
-ENTRYPOINT ["/engine"]
-`
 	case "binary", "bin":
 		// Pre-compiled Linux binary shipped in the artifact as `engine`.
 		content = `FROM debian:stable-slim
@@ -206,7 +183,7 @@ EXPOSE 8080
 ENTRYPOINT ["/engine"]
 `
 	default:
-		return fmt.Errorf("no default Dockerfile for language %q; supported: go, rust, cpp, binary — or include a Dockerfile in the artifact", language)
+		return fmt.Errorf("no default Dockerfile for language %q; supported: go, rust, binary — or include a Dockerfile in the artifact", language)
 	}
 	return os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(content), 0o644)
 }
