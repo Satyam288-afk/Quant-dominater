@@ -542,6 +542,11 @@
               <span class="small">acks / sec</span>
             </div>
             <div class="metric">
+              <span class="label">p50</span>
+              <span class="value" id="metric-p50">-</span>
+              <span class="small">ack latency</span>
+            </div>
+            <div class="metric">
               <span class="label">p99</span>
               <span class="value" id="metric-p99">-</span>
               <span class="small">ack latency</span>
@@ -578,15 +583,17 @@
                         <th style="width: 118px">Team</th>
                         <th style="width: 142px">Run</th>
                         <th style="width: 88px">Status</th>
-                        <th style="width: 66px">Valid</th>
+                        <th style="width: 100px">Correctness</th>
                         <th class="num" style="width: 70px">Score</th>
                         <th class="num" style="width: 66px">TPS</th>
+                        <th class="num" style="width: 70px">p50</th>
+                        <th class="num" style="width: 70px">p90</th>
                         <th class="num" style="width: 76px">p99</th>
                         <th style="width: 88px">Failure</th>
                       </tr>
                     </thead>
                     <tbody id="leaderboard-rows">
-                      <tr><td colspan="9" class="muted">No runs yet.</td></tr>
+                      <tr><td colspan="11" class="muted">No runs yet.</td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -852,8 +859,9 @@
         const validation = state.validation || {};
         const score = state.score || {};
         document.querySelector("#metric-score").textContent = state.run?.score ? fmt(state.run.score) : score.score ? fmt(score.score) : "-";
-        document.querySelector("#metric-valid").textContent = validation.valid === true ? "valid" : validation.valid === false ? "invalid" : "-";
+        document.querySelector("#metric-valid").textContent = validation.valid === true ? "✓ correct" : validation.valid === false ? "✗ incorrect" : "-";
         document.querySelector("#metric-tps").textContent = metrics.tps ? fmt(metrics.tps) : "-";
+        document.querySelector("#metric-p50").textContent = metrics.p50_ms ? fmt(metrics.p50_ms, 2, "ms") : "-";
         document.querySelector("#metric-p99").textContent = metrics.p99_ms ? fmt(metrics.p99_ms, 2, "ms") : "-";
         document.querySelector("#metric-orders").textContent = metrics.orders_sent !== undefined ? fmtInt(metrics.orders_sent) : "-";
         document.querySelector("#metric-acks").textContent = metrics.acks_received !== undefined ? `${fmtInt(metrics.acks_received)} acks` : "-";
@@ -899,19 +907,23 @@
         document.querySelector("#leaderboard-count").textContent = `${entries.length} ${entries.length === 1 ? "run" : "runs"}`;
         const rows = document.querySelector("#leaderboard-rows");
         if (!entries.length) {
-          rows.innerHTML = '<tr><td colspan="9" class="muted">No runs yet.</td></tr>';
+          rows.innerHTML = '<tr><td colspan="11" class="muted">No runs yet.</td></tr>';
           return;
         }
         rows.innerHTML = entries.map((entry, idx) => {
           const valid = entry.valid === true ? "valid" : entry.valid === false ? "invalid" : "pending";
+          const corr = entry.correctness_gate ? entry.correctness_gate : (entry.valid === true ? "passed" : entry.valid === false ? "failed" : "pending");
+          const corrText = corr === "passed" ? "✓ passed" : corr === "failed" ? "✗ failed" : corr;
           return `<tr>
             <td>${idx + 1}</td>
             <td title="${escapeHTML(entry.team_id)}">${escapeHTML(entry.team_id || "-")}</td>
             <td title="${escapeHTML(entry.run_id)}">${escapeHTML(shortRunId(entry.run_id))}</td>
             <td><span class="badge">${escapeHTML(entry.status || "-")}</span></td>
-            <td class="${valid === "valid" ? "valid" : valid === "invalid" ? "invalid" : ""}">${valid}</td>
+            <td class="${valid === "valid" ? "valid" : valid === "invalid" ? "invalid" : ""}">${corrText}</td>
             <td class="num">${fmt(entry.score)}</td>
             <td class="num">${fmt(entry.tps)}</td>
+            <td class="num">${fmt(entry.p50_ms, 2, "ms")}</td>
+            <td class="num">${fmt(entry.p90_ms, 2, "ms")}</td>
             <td class="num">${fmt(entry.p99_ms, 2, "ms")}</td>
             <td title="${escapeHTML(entry.failure_reason || "")}">${escapeHTML(entry.failure_reason || "-")}</td>
           </tr>`;
