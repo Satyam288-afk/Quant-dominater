@@ -3,66 +3,147 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>IICPC Control Console</title>
+    <title>IICPC Execution Lab</title>
     <style>
       :root {
         color-scheme: dark;
-        --bg: #0f1113;
-        --surface: #171a1d;
-        --surface-2: #1d2226;
-        --line: #30363d;
-        --line-soft: #242a30;
-        --text: #f4f7f9;
-        --muted: #a7b1bb;
-        --dim: #78838d;
-        --green: #5ed991;
-        --red: #ff7676;
-        --amber: #f0bf63;
-        --cyan: #6ec7df;
-        --blue: #89a9ff;
+        --bg: #070a0d;
+        --surface: rgba(13, 18, 23, 0.92);
+        --surface-raised: #111820;
+        --surface-hover: #16202a;
+        --line: #22303b;
+        --line-bright: #304353;
+        --text: #eef6f7;
+        --muted: #82929e;
+        --dim: #566570;
+        --green: #45e6a8;
+        --green-rgb: 69, 230, 168;
+        --red: #ff6b7a;
+        --amber: #f5c26b;
+        --cyan: #53d9ff;
+        --cyan-rgb: 83, 217, 255;
+        --blue: #789cff;
+        --mono: "SFMono-Regular", "Cascadia Code", "Roboto Mono", Consolas, monospace;
       }
 
       * {
         box-sizing: border-box;
       }
 
-      body {
-        margin: 0;
+      html {
+        min-width: 320px;
         background: var(--bg);
+      }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        background:
+          radial-gradient(circle at 82% -10%, rgba(var(--cyan-rgb), 0.09), transparent 34rem),
+          radial-gradient(circle at 10% 40%, rgba(var(--green-rgb), 0.045), transparent 28rem),
+          linear-gradient(rgba(83, 217, 255, 0.018) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(83, 217, 255, 0.018) 1px, transparent 1px),
+          var(--bg);
+        background-size: auto, auto, 32px 32px, 32px 32px, auto;
         color: var(--text);
         font-family:
           Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
           "Segoe UI", sans-serif;
       }
 
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+
+      button,
+      input,
+      select,
+      summary,
+      a {
+        -webkit-tap-highlight-color: transparent;
+      }
+
       main {
-        width: min(1500px, calc(100vw - 32px));
-        margin: 22px auto 34px;
+        width: min(1540px, calc(100vw - 40px));
+        margin: 24px auto 40px;
       }
 
       header {
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto;
-        gap: 16px;
-        align-items: end;
-        margin-bottom: 16px;
+        gap: 24px;
+        align-items: center;
+        margin-bottom: 18px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+
+      .brand-mark {
+        position: relative;
+        display: grid;
+        width: 46px;
+        height: 46px;
+        flex: 0 0 auto;
+        place-items: center;
+        overflow: hidden;
+        border: 1px solid rgba(var(--cyan-rgb), 0.28);
+        border-radius: 12px;
+        background: linear-gradient(145deg, rgba(var(--cyan-rgb), 0.16), rgba(var(--green-rgb), 0.06));
+        box-shadow: inset 0 0 22px rgba(var(--cyan-rgb), 0.05), 0 0 28px rgba(var(--cyan-rgb), 0.06);
+      }
+
+      .brand-mark::before,
+      .brand-mark::after {
+        position: absolute;
+        content: "";
+      }
+
+      .brand-mark::before {
+        width: 25px;
+        height: 14px;
+        border-right: 2px solid var(--cyan);
+        border-bottom: 2px solid var(--cyan);
+        transform: skewY(-28deg) rotate(-7deg);
+      }
+
+      .brand-mark::after {
+        width: 4px;
+        height: 4px;
+        border-radius: 50%;
+        background: var(--green);
+        box-shadow: -11px 6px 0 var(--cyan), 11px -6px 0 var(--cyan);
       }
 
       h1,
       h2 {
         margin: 0;
-        letter-spacing: 0;
+      }
+
+      .eyebrow {
+        margin-bottom: 5px;
+        color: var(--green);
+        font: 600 10px/1.2 var(--mono);
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
       }
 
       h1 {
-        font-size: clamp(28px, 3.2vw, 42px);
-        line-height: 1.05;
-        font-weight: 780;
+        font-size: clamp(24px, 2.6vw, 36px);
+        line-height: 1;
+        font-weight: 700;
+        letter-spacing: -0.035em;
       }
 
       h2 {
-        font-size: 15px;
-        font-weight: 750;
+        font-size: 14px;
+        font-weight: 650;
+        letter-spacing: -0.01em;
       }
 
       .subhead,
@@ -73,42 +154,95 @@
       }
 
       .subhead {
-        margin-top: 6px;
-        font-size: 14px;
+        margin-top: 7px;
+        font-size: 13px;
       }
 
       .service-strip {
         display: flex;
         flex-wrap: wrap;
-        gap: 8px;
+        gap: 7px;
         justify-content: flex-end;
       }
 
       .badge {
         display: inline-flex;
         align-items: center;
-        min-height: 26px;
+        min-height: 25px;
         padding: 4px 9px;
         border: 1px solid var(--line);
         border-radius: 999px;
         color: var(--muted);
-        font-size: 12px;
+        background: rgba(7, 10, 13, 0.52);
+        font: 500 10px/1 var(--mono);
+        letter-spacing: 0.02em;
         white-space: nowrap;
       }
 
+      .service-strip .badge::before {
+        width: 5px;
+        height: 5px;
+        margin-right: 6px;
+        border-radius: 50%;
+        background: currentColor;
+        content: "";
+        box-shadow: 0 0 8px currentColor;
+      }
+
       .badge.ok {
-        border-color: rgba(94, 217, 145, 0.38);
+        border-color: rgba(var(--green-rgb), 0.28);
         color: var(--green);
       }
 
       .badge.warn {
-        border-color: rgba(240, 191, 99, 0.38);
+        border-color: rgba(245, 194, 107, 0.3);
         color: var(--amber);
       }
 
       .badge.bad {
-        border-color: rgba(255, 118, 118, 0.38);
+        border-color: rgba(255, 107, 122, 0.34);
         color: var(--red);
+      }
+
+      .market-strip {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        overflow: hidden;
+        margin-bottom: 14px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: rgba(8, 13, 17, 0.82);
+      }
+
+      .market-item {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        min-width: 0;
+        padding: 9px 13px;
+        border-right: 1px solid var(--line);
+        font: 500 10px/1 var(--mono);
+        text-transform: uppercase;
+      }
+
+      .market-item:last-child {
+        border-right: 0;
+      }
+
+      .market-key {
+        color: var(--dim);
+        letter-spacing: 0.1em;
+      }
+
+      .market-value {
+        overflow: hidden;
+        color: var(--text);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .market-value.live {
+        color: var(--green);
       }
 
       .layout {
@@ -124,39 +258,90 @@
       }
 
       .panel,
-      .metric,
-      .timeline-step {
+      .metric {
+        position: relative;
         border: 1px solid var(--line);
         background: var(--surface);
-        border-radius: 8px;
+        box-shadow: 0 14px 32px rgba(0, 0, 0, 0.16);
+        backdrop-filter: blur(12px);
       }
 
       .panel {
         overflow: hidden;
+        border-radius: 12px;
+      }
+
+      .configuration-panel {
+        border-color: rgba(var(--green-rgb), 0.25);
+        background:
+          radial-gradient(circle at 0 0, rgba(var(--green-rgb), 0.1), transparent 19rem),
+          linear-gradient(145deg, rgba(var(--green-rgb), 0.035), rgba(13, 18, 23, 0.94) 58%);
+        box-shadow: 0 18px 42px rgba(0, 0, 0, 0.2), inset 0 1px rgba(var(--green-rgb), 0.06);
+      }
+
+      .configuration-panel .panel-header {
+        border-bottom-color: rgba(var(--green-rgb), 0.16);
+        background: linear-gradient(90deg, rgba(var(--green-rgb), 0.075), transparent 70%);
+      }
+
+      .configuration-panel .panel-title::before {
+        background: var(--green);
+        box-shadow: 0 0 12px rgba(var(--green-rgb), 0.42);
+      }
+
+      .configuration-panel input,
+      .configuration-panel select,
+      .configuration-panel details.advanced {
+        border-color: rgba(var(--green-rgb), 0.16);
+        background-color: rgba(4, 13, 11, 0.58);
+      }
+
+      .configuration-panel input:hover,
+      .configuration-panel select:hover,
+      .configuration-panel details.advanced:hover {
+        border-color: rgba(var(--green-rgb), 0.32);
       }
 
       .panel-header {
         display: flex;
+        min-height: 50px;
         justify-content: space-between;
         align-items: center;
         gap: 12px;
-        padding: 14px 16px;
-        border-bottom: 1px solid var(--line-soft);
+        padding: 13px 15px;
+        border-bottom: 1px solid var(--line);
+        background: linear-gradient(90deg, rgba(var(--cyan-rgb), 0.025), transparent);
+      }
+
+      .panel-title {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+      }
+
+      .panel-title::before {
+        width: 3px;
+        height: 14px;
+        border-radius: 2px;
+        background: var(--cyan);
+        content: "";
+        box-shadow: 0 0 10px rgba(var(--cyan-rgb), 0.38);
       }
 
       .panel-body {
-        padding: 16px;
+        padding: 15px;
       }
 
-      .field-grid {
+      .field-grid,
+      .advanced-grid {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 12px;
+        gap: 11px;
       }
 
       .field {
         display: grid;
-        gap: 7px;
+        gap: 6px;
       }
 
       .field.full {
@@ -165,9 +350,9 @@
 
       label,
       .label {
-        font-size: 11px;
-        font-weight: 780;
-        letter-spacing: 0.04em;
+        color: var(--muted);
+        font: 600 10px/1.2 var(--mono);
+        letter-spacing: 0.08em;
         text-transform: uppercase;
       }
 
@@ -176,20 +361,57 @@
         width: 100%;
         min-height: 40px;
         border: 1px solid var(--line);
-        border-radius: 7px;
-        background: #101316;
+        border-radius: 8px;
+        outline: 0;
+        background: rgba(5, 9, 12, 0.72);
         color: var(--text);
-        padding: 9px 10px;
-        font: inherit;
+        padding: 9px 11px;
+        font-size: 13px;
+        transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
+      }
+
+      input:hover,
+      select:hover {
+        border-color: var(--line-bright);
+        background: rgba(9, 15, 20, 0.92);
+      }
+
+      input:focus-visible,
+      select:focus-visible,
+      button:focus-visible,
+      summary:focus-visible,
+      a:focus-visible {
+        outline: 2px solid rgba(var(--cyan-rgb), 0.72);
+        outline-offset: 2px;
+      }
+
+      input::placeholder {
+        color: var(--dim);
       }
 
       input[type="file"] {
-        padding: 8px;
+        min-height: 54px;
+        padding: 7px;
+        color: var(--muted);
+        cursor: pointer;
+      }
+
+      input[type="file"]::file-selector-button {
+        height: 38px;
+        margin-right: 10px;
+        padding: 0 13px;
+        border: 1px solid var(--line-bright);
+        border-radius: 7px;
+        background: var(--surface-raised);
+        color: var(--cyan);
+        font: 600 11px var(--mono);
+        cursor: pointer;
       }
 
       input[type="checkbox"] {
-        width: 18px;
-        min-height: 18px;
+        width: 17px;
+        min-height: 17px;
+        accent-color: var(--cyan);
       }
 
       .check-row {
@@ -199,110 +421,259 @@
         min-height: 40px;
       }
 
+      .check-row label {
+        color: var(--muted);
+        font-family: inherit;
+        font-size: 12px;
+        font-weight: 450;
+        letter-spacing: 0;
+        text-transform: none;
+        cursor: pointer;
+      }
+
+      details.advanced {
+        grid-column: 1 / -1;
+        margin-top: 1px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgba(5, 9, 12, 0.35);
+      }
+
+      details.advanced summary {
+        display: flex;
+        min-height: 39px;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 11px;
+        color: var(--muted);
+        font: 600 10px var(--mono);
+        letter-spacing: 0.08em;
+        list-style: none;
+        text-transform: uppercase;
+        cursor: pointer;
+      }
+
+      details.advanced summary::-webkit-details-marker {
+        display: none;
+      }
+
+      details.advanced summary::after {
+        color: var(--cyan);
+        content: "+";
+        font-size: 16px;
+      }
+
+      details.advanced[open] summary::after {
+        content: "−";
+      }
+
+      .advanced-grid {
+        padding: 0 11px 11px;
+      }
+
       .button-row {
         display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 10px;
-        margin-top: 14px;
+        grid-template-columns: 0.85fr 1.15fr;
+        gap: 9px;
+        margin-top: 13px;
       }
 
       button {
         min-height: 42px;
         border: 1px solid var(--line);
-        border-radius: 7px;
-        background: var(--surface-2);
+        border-radius: 8px;
+        background: var(--surface-raised);
         color: var(--text);
-        font: inherit;
-        font-weight: 720;
+        font-size: 12px;
+        font-weight: 650;
         cursor: pointer;
+        transition: transform 120ms ease, border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
+      }
+
+      button:hover {
+        border-color: var(--line-bright);
+        background: var(--surface-hover);
+      }
+
+      button:active {
+        transform: translateY(1px);
       }
 
       button.primary {
-        border-color: rgba(110, 199, 223, 0.45);
-        background: #17313a;
-        color: #dff8ff;
+        border-color: rgba(var(--cyan-rgb), 0.36);
+        background: linear-gradient(135deg, rgba(var(--cyan-rgb), 0.22), rgba(var(--green-rgb), 0.12));
+        color: #e9fbff;
+        box-shadow: inset 0 1px rgba(255, 255, 255, 0.04), 0 8px 24px rgba(var(--cyan-rgb), 0.06);
+      }
+
+      button.primary:hover {
+        border-color: rgba(var(--cyan-rgb), 0.62);
+        box-shadow: 0 8px 28px rgba(var(--cyan-rgb), 0.12);
       }
 
       button:disabled {
         cursor: not-allowed;
-        opacity: 0.55;
+        opacity: 0.5;
       }
 
       .status-line {
-        min-height: 22px;
-        margin-top: 12px;
+        min-height: 20px;
+        margin-top: 11px;
         color: var(--muted);
-        font-size: 13px;
+        font: 500 11px/1.5 var(--mono);
+      }
+
+      .status-line::before {
+        margin-right: 7px;
+        color: var(--green);
+        content: "›";
       }
 
       .timeline {
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 10px;
+        grid-template-columns: repeat(8, minmax(0, 1fr));
+        gap: 0;
+        padding-top: 12px;
+        counter-reset: stage;
       }
 
       .timeline-step {
-        padding: 12px;
-        min-height: 82px;
+        position: relative;
+        min-width: 0;
+        min-height: 72px;
+        padding: 24px 10px 8px;
+        border-top: 1px solid var(--line-bright);
+        counter-increment: stage;
       }
 
-      .timeline-step.active {
-        border-color: rgba(110, 199, 223, 0.45);
+      .timeline-step::before {
+        position: absolute;
+        top: -13px;
+        left: 10px;
+        display: grid;
+        width: 25px;
+        height: 25px;
+        place-items: center;
+        border: 1px solid var(--line-bright);
+        border-radius: 50%;
+        background: var(--bg);
+        color: var(--dim);
+        content: counter(stage, decimal-leading-zero);
+        font: 600 8px var(--mono);
       }
 
-      .timeline-step.done {
-        border-color: rgba(94, 217, 145, 0.35);
+      .timeline-step.active::before {
+        border-color: var(--cyan);
+        color: var(--cyan);
+        box-shadow: 0 0 15px rgba(var(--cyan-rgb), 0.2);
       }
 
-      .timeline-step.failed {
-        border-color: rgba(255, 118, 118, 0.45);
+      .timeline-step.done::before {
+        border-color: var(--green);
+        background: rgba(var(--green-rgb), 0.09);
+        color: var(--green);
+        content: "✓";
+      }
+
+      .timeline-step.failed::before {
+        border-color: var(--red);
+        color: var(--red);
+        content: "!";
       }
 
       .step-title {
-        font-size: 13px;
-        font-weight: 740;
+        overflow: hidden;
+        font: 650 10px/1.3 var(--mono);
+        letter-spacing: 0.045em;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .step-copy {
-        margin-top: 8px;
-        color: var(--muted);
-        font-size: 12px;
+        margin-top: 4px;
+        color: var(--dim);
+        font-size: 10px;
+        line-height: 1.35;
       }
 
       .metric-grid {
         display: grid;
         grid-template-columns: repeat(6, minmax(0, 1fr));
-        gap: 10px;
+        gap: 9px;
       }
 
       .metric {
+        min-height: 105px;
+        overflow: hidden;
         padding: 14px;
-        min-height: 92px;
+        border-radius: 11px;
+      }
+
+      .metric::before {
+        position: absolute;
+        top: 0;
+        right: 0;
+        left: 0;
+        height: 2px;
+        background: linear-gradient(90deg, var(--cyan), transparent 72%);
+        opacity: 0.65;
+        content: "";
+      }
+
+      .metric:nth-child(1)::before,
+      .metric:nth-child(4)::before {
+        background: linear-gradient(90deg, var(--green), transparent 72%);
+      }
+
+      .metric:nth-child(3)::before,
+      .metric:nth-child(5)::before {
+        background: linear-gradient(90deg, var(--amber), transparent 72%);
       }
 
       .value {
         display: block;
-        margin-top: 12px;
-        font-size: 25px;
-        line-height: 1;
-        font-weight: 780;
+        margin-top: 15px;
+        font: 600 25px/1 var(--mono);
         font-variant-numeric: tabular-nums;
+        letter-spacing: -0.04em;
       }
 
       .small {
         display: block;
-        margin-top: 8px;
-        font-size: 12px;
         overflow: hidden;
+        margin-top: 10px;
+        font: 500 10px/1.2 var(--mono);
         text-overflow: ellipsis;
         white-space: nowrap;
       }
 
       .split {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) 360px;
+        grid-template-columns: minmax(0, 1fr) 330px;
         gap: 14px;
         align-items: start;
+      }
+
+      .results-column {
+        grid-template-rows: minmax(210px, auto) minmax(192px, auto);
+      }
+
+      .detail-column {
+        grid-template-rows: minmax(160px, auto) minmax(190px, 1fr);
+      }
+
+      .results-column > .panel,
+      .detail-column > .panel {
+        height: 100%;
+      }
+
+      .leaderboard-panel .table-wrap {
+        min-height: 158px;
+      }
+
+      .log-panel .log {
+        height: 100%;
+        min-height: 190px;
       }
 
       .table-wrap {
@@ -318,22 +689,32 @@
 
       th,
       td {
-        padding: 12px 10px;
-        border-bottom: 1px solid var(--line-soft);
-        text-align: left;
-        font-size: 13px;
-        white-space: nowrap;
         overflow: hidden;
+        padding: 12px 10px;
+        border-bottom: 1px solid rgba(34, 48, 59, 0.72);
+        text-align: left;
         text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      td {
+        font: 500 11px/1.3 var(--mono);
       }
 
       th {
-        color: var(--muted);
-        font-size: 11px;
-        font-weight: 780;
-        letter-spacing: 0.04em;
+        color: var(--dim);
+        background: rgba(5, 9, 12, 0.46);
+        font: 600 9px/1.2 var(--mono);
+        letter-spacing: 0.1em;
         text-transform: uppercase;
-        background: #14171a;
+      }
+
+      tbody tr {
+        transition: background 120ms ease;
+      }
+
+      tbody tr:hover {
+        background: rgba(var(--cyan-rgb), 0.025);
       }
 
       .num {
@@ -351,11 +732,11 @@
 
       .detail-row {
         display: grid;
-        grid-template-columns: 112px minmax(0, 1fr);
-        gap: 12px;
+        grid-template-columns: 92px minmax(0, 1fr);
+        gap: 10px;
         padding: 9px 0;
-        border-bottom: 1px solid var(--line-soft);
-        font-size: 13px;
+        border-bottom: 1px solid rgba(34, 48, 59, 0.66);
+        font: 500 11px/1.3 var(--mono);
       }
 
       .detail-row:last-child {
@@ -364,6 +745,8 @@
 
       .detail-value {
         overflow: hidden;
+        color: #cbd7dc;
+        text-align: right;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
@@ -377,61 +760,200 @@
       .artifact-chip {
         display: inline-flex;
         align-items: center;
-        min-height: 28px;
-        padding: 4px 9px;
+        min-height: 29px;
+        padding: 4px 10px;
         border: 1px solid var(--line);
-        border-radius: 999px;
+        border-radius: 7px;
         color: var(--muted);
-        font-size: 12px;
+        background: rgba(5, 9, 12, 0.42);
+        font: 500 10px var(--mono);
         text-decoration: none;
       }
 
+      .artifact-chip::before {
+        margin-right: 6px;
+        color: var(--dim);
+        content: "↳";
+      }
+
       .artifact-chip.ready {
-        border-color: rgba(110, 199, 223, 0.35);
+        border-color: rgba(var(--cyan-rgb), 0.26);
         color: var(--cyan);
       }
 
       .log {
-        min-height: 120px;
-        max-height: 220px;
+        min-height: 126px;
+        max-height: 230px;
         overflow: auto;
         margin: 0;
-        padding: 14px 16px;
-        background: #0c0f11;
-        color: var(--muted);
-        font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        padding: 13px 15px;
+        background: rgba(3, 6, 8, 0.8);
+        color: #71838f;
+        font: 10px/1.65 var(--mono);
+      }
+
+      .empty-state {
+        display: grid;
+        min-height: 76px;
+        place-items: center;
+        color: var(--dim);
+        font: 500 10px var(--mono);
       }
 
       @media (max-width: 1180px) {
-        .layout,
-        .split {
-          grid-template-columns: 1fr;
+        .layout {
+          grid-template-columns: 380px minmax(0, 1fr);
         }
 
         .metric-grid {
           grid-template-columns: repeat(3, minmax(0, 1fr));
         }
+
+        .timeline {
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          row-gap: 14px;
+        }
+
+        .split {
+          grid-template-columns: 1fr;
+        }
+
+        .results-column,
+        .detail-column {
+          grid-template-rows: auto;
+        }
       }
 
-      @media (max-width: 760px) {
+      @media (max-width: 860px) {
         main {
-          width: calc(100vw - 20px);
-          margin: 16px auto 24px;
+          width: min(100% - 24px, 700px);
+          margin-top: 16px;
         }
 
         header {
           grid-template-columns: 1fr;
+          gap: 14px;
         }
 
         .service-strip {
           justify-content: flex-start;
         }
 
-        .field-grid,
-        .button-row,
-        .timeline,
-        .metric-grid {
+        .market-strip {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .market-item:nth-child(2) {
+          border-right: 0;
+        }
+
+        .market-item:nth-child(-n + 2) {
+          border-bottom: 1px solid var(--line);
+        }
+
+        .layout {
           grid-template-columns: 1fr;
+        }
+
+        body.has-run .workspace {
+          grid-row: 1;
+        }
+
+        body.has-run .sidebar {
+          grid-row: 2;
+        }
+      }
+
+      @media (max-width: 560px) {
+        main {
+          width: calc(100% - 18px);
+          margin: 12px auto 24px;
+        }
+
+        .brand {
+          align-items: flex-start;
+        }
+
+        .brand-mark {
+          width: 40px;
+          height: 40px;
+        }
+
+        h1 {
+          font-size: 25px;
+        }
+
+        .subhead {
+          max-width: 270px;
+          line-height: 1.45;
+        }
+
+        .market-strip {
+          grid-template-columns: 1fr 1fr;
+        }
+
+        .market-item {
+          display: grid;
+          gap: 5px;
+        }
+
+        .metric-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .metric {
+          min-height: 96px;
+        }
+
+        .field-grid,
+        .advanced-grid,
+        .button-row {
+          grid-template-columns: 1fr;
+        }
+
+        .timeline {
+          grid-template-columns: 1fr;
+          gap: 0;
+          padding-top: 0;
+        }
+
+        .timeline-step {
+          min-height: 52px;
+          margin-left: 13px;
+          padding: 8px 9px 8px 30px;
+          border-top: 0;
+          border-left: 1px solid var(--line-bright);
+        }
+
+        .timeline-step:last-child {
+          border-left-color: transparent;
+        }
+
+        .timeline-step::before {
+          top: 6px;
+          left: -13px;
+        }
+
+        .field.full,
+        details.advanced {
+          grid-column: auto;
+        }
+
+        .button-row {
+          gap: 8px;
+        }
+
+        .panel-body {
+          padding: 13px;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          transition-duration: 0.01ms !important;
         }
       }
     </style>
@@ -439,11 +961,15 @@
   <body>
     <main>
       <header>
-        <div>
-          <h1>IICPC Control Console</h1>
-          <div class="subhead">upload -> sandbox -> benchmark -> validate -> score -> leaderboard</div>
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true"></div>
+          <div>
+            <div class="eyebrow">IICPC / Quant Infrastructure</div>
+            <h1>Execution Lab</h1>
+            <div class="subhead">Benchmark trading engines under deterministic market load.</div>
+          </div>
         </div>
-        <div class="service-strip">
+        <div class="service-strip" aria-label="Service health">
           <span class="badge" id="svc-console">console</span>
           <span class="badge" id="svc-submission">submission</span>
           <span class="badge" id="svc-orchestrator">orchestrator</span>
@@ -451,11 +977,30 @@
         </div>
       </header>
 
+      <section class="market-strip" aria-label="Environment summary">
+        <div class="market-item">
+          <span class="market-key">Market clock</span>
+          <span class="market-value live">Deterministic</span>
+        </div>
+        <div class="market-item">
+          <span class="market-key">Environment</span>
+          <span class="market-value">Local Sandbox</span>
+        </div>
+        <div class="market-item">
+          <span class="market-key">Protocol</span>
+          <span class="market-value">WS / JSON</span>
+        </div>
+        <div class="market-item">
+          <span class="market-key">Model</span>
+          <span class="market-value">Price-Time Priority</span>
+        </div>
+      </section>
+
       <section class="layout">
-        <div class="stack">
-          <div class="panel">
+        <div class="stack sidebar">
+          <div class="panel configuration-panel">
             <div class="panel-header">
-              <h2>Submit Engine</h2>
+              <div class="panel-title"><h2>Strategy Configuration</h2></div>
               <span class="badge" id="submission-state">waiting</span>
             </div>
             <div class="panel-body">
@@ -474,100 +1019,105 @@
                     </select>
                   </div>
                   <div class="field full">
-                    <label for="artifact">Engine artifact</label>
+                    <label for="artifact">Engine package</label>
                     <input id="artifact" name="artifact" type="file" accept=".zip,.go" required />
                   </div>
                   <div class="field">
-                    <label for="bot-count">Bots</label>
+                    <label for="bot-count">Simulated clients</label>
                     <input id="bot-count" type="number" min="1" value="10" />
                   </div>
                   <div class="field">
-                    <label for="rate-per-bot">Rate / Bot</label>
+                    <label for="rate-per-bot">Orders/sec/client</label>
                     <input id="rate-per-bot" type="number" min="1" value="2" />
                   </div>
                   <div class="field">
-                    <label for="duration-sec">Duration</label>
+                    <label for="duration-sec">Duration (sec)</label>
                     <input id="duration-sec" type="number" min="1" value="5" />
                   </div>
                   <div class="field">
-                    <label for="seed">Seed</label>
+                    <label for="seed">Market seed</label>
                     <input id="seed" type="number" value="42" />
                   </div>
-                  <div class="field">
-                    <label for="cpu-limit">CPU Limit</label>
-                    <input id="cpu-limit" value="1" />
-                  </div>
-                  <div class="field">
-                    <label for="memory-limit">Memory Limit</label>
-                    <input id="memory-limit" value="512Mi" />
-                  </div>
-                  <div class="field full">
-                    <label>Network</label>
-                    <div class="check-row">
-                      <input id="network-egress" type="checkbox" autocomplete="off" />
-                      <span class="muted">allow internet egress</span>
+                  <details class="advanced">
+                    <summary>Sandbox controls</summary>
+                    <div class="advanced-grid">
+                      <div class="field">
+                        <label for="cpu-limit">CPU cores</label>
+                        <input id="cpu-limit" value="1" />
+                      </div>
+                      <div class="field">
+                        <label for="memory-limit">Memory limit</label>
+                        <input id="memory-limit" value="512Mi" />
+                      </div>
+                      <div class="field full">
+                        <div class="check-row">
+                          <input id="network-egress" type="checkbox" autocomplete="off" />
+                          <label for="network-egress">Allow internet egress</label>
+                        </div>
+                      </div>
                     </div>
-                  </div>
+                  </details>
                 </div>
                 <div class="button-row">
-                  <button type="button" id="load-example">Use example ZIP</button>
-                  <button class="primary" id="submit-run" type="submit">Submit & Run</button>
+                  <button type="button" id="load-example">Example package</button>
+                  <button class="primary" id="submit-run" type="submit">Launch benchmark</button>
                 </div>
-                <div class="status-line" id="form-status">Ready.</div>
+                <div class="status-line" id="form-status" role="status" aria-live="polite">Ready for strategy upload.</div>
               </form>
             </div>
           </div>
 
-          <div class="panel">
+        </div>
+
+        <div class="stack workspace">
+          <section class="metric-grid">
+            <div class="metric">
+              <span class="label">Composite score</span>
+              <span class="value" id="metric-score">-</span>
+              <span class="small" id="metric-valid">awaiting validation</span>
+            </div>
+            <div class="metric">
+              <span class="label">Throughput</span>
+              <span class="value" id="metric-tps">-</span>
+              <span class="small">acks / sec</span>
+            </div>
+            <div class="metric">
+              <span class="label">Tail latency</span>
+              <span class="value" id="metric-p99">-</span>
+              <span class="small">p99 execution</span>
+            </div>
+            <div class="metric">
+              <span class="label">Order flow</span>
+              <span class="value" id="metric-orders">-</span>
+              <span class="small" id="metric-acks">-</span>
+            </div>
+            <div class="metric">
+              <span class="label">Executions</span>
+              <span class="value" id="metric-fills">-</span>
+              <span class="small" id="metric-timeouts">-</span>
+            </div>
+            <div class="metric">
+              <span class="label">Audit trail</span>
+              <span class="value" id="metric-artifacts">-</span>
+              <span class="small">evidence files</span>
+            </div>
+          </section>
+
+          <section class="panel pipeline-panel">
             <div class="panel-header">
-              <h2>Run Timeline</h2>
+              <div class="panel-title"><h2>Execution Pipeline</h2></div>
               <span class="badge" id="run-state">idle</span>
             </div>
             <div class="panel-body">
               <div class="timeline" id="timeline"></div>
             </div>
-          </div>
-        </div>
-
-        <div class="stack">
-          <section class="metric-grid">
-            <div class="metric">
-              <span class="label">Score</span>
-              <span class="value" id="metric-score">-</span>
-              <span class="small" id="metric-valid">-</span>
-            </div>
-            <div class="metric">
-              <span class="label">TPS</span>
-              <span class="value" id="metric-tps">-</span>
-              <span class="small">acks / sec</span>
-            </div>
-            <div class="metric">
-              <span class="label">p99</span>
-              <span class="value" id="metric-p99">-</span>
-              <span class="small">ack latency</span>
-            </div>
-            <div class="metric">
-              <span class="label">Orders</span>
-              <span class="value" id="metric-orders">-</span>
-              <span class="small" id="metric-acks">-</span>
-            </div>
-            <div class="metric">
-              <span class="label">Fills</span>
-              <span class="value" id="metric-fills">-</span>
-              <span class="small" id="metric-timeouts">-</span>
-            </div>
-            <div class="metric">
-              <span class="label">Artifacts</span>
-              <span class="value" id="metric-artifacts">-</span>
-              <span class="small">audit files</span>
-            </div>
           </section>
 
           <section class="split">
-            <div class="stack">
-              <div class="panel">
+            <div class="stack results-column">
+              <div class="panel leaderboard-panel">
                 <div class="panel-header">
-                  <h2>Leaderboard</h2>
+                  <div class="panel-title"><h2>Performance Leaderboard</h2></div>
                   <span class="badge" id="leaderboard-count">0 runs</span>
                 </div>
                 <div class="table-wrap">
@@ -592,9 +1142,9 @@
                 </div>
               </div>
 
-              <div class="panel">
+              <div class="panel artifacts-panel">
                 <div class="panel-header">
-                  <h2>Artifacts</h2>
+                  <div class="panel-title"><h2>Audit Artifacts</h2></div>
                   <span class="badge" id="artifact-state">waiting</span>
                 </div>
                 <div class="panel-body">
@@ -603,21 +1153,21 @@
               </div>
             </div>
 
-            <aside class="stack">
-              <div class="panel">
+            <aside class="stack detail-column">
+              <div class="panel detail-panel">
                 <div class="panel-header">
-                  <h2>Run Detail</h2>
+                  <div class="panel-title"><h2>Run Detail</h2></div>
                   <span class="badge" id="detail-state">idle</span>
                 </div>
                 <div class="panel-body" id="run-detail"></div>
               </div>
 
-              <div class="panel">
+              <div class="panel log-panel">
                 <div class="panel-header">
-                  <h2>Event Log</h2>
+                  <div class="panel-title"><h2>Market Event Log</h2></div>
                   <span class="badge" id="log-count">0</span>
                 </div>
-                <pre class="log" id="event-log"></pre>
+                <pre class="log" id="event-log" aria-live="polite"></pre>
               </div>
             </aside>
           </section>
@@ -826,11 +1376,25 @@
           else if (idx < currentIndex || status === "FINISHED") cls = "done";
           else if (idx === currentIndex) cls = "active";
           return `<div class="timeline-step ${cls}">
-            <div class="step-title">${stage}</div>
+            <div class="step-title">${stageLabel(stage)}</div>
             <div class="step-copy">${stepCopy(stage)}</div>
           </div>`;
         }).join("");
         setBadge("run-state", status.toLowerCase(), failed ? "bad" : status === "FINISHED" ? "ok" : status === "IDLE" ? "" : "warn");
+      }
+
+      function stageLabel(stage) {
+        const labels = {
+          QUEUED: "QUEUED",
+          BUILDING: "BUILD",
+          SANDBOX_STARTING: "SANDBOX",
+          HEALTHCHECKING: "HEALTHCHECK",
+          BENCHMARKING: "BENCHMARK",
+          VALIDATING: "VALIDATE",
+          SCORING: "SCORE",
+          FINISHED: "COMPLETE",
+        };
+        return labels[stage] || stage;
       }
 
       function stepCopy(stage) {
@@ -919,6 +1483,7 @@
       }
 
       function render() {
+        document.body.classList.toggle("has-run", Boolean(state.run));
         renderTimeline();
         renderMetrics();
         renderDetail();
